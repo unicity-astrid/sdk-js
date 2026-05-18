@@ -60,52 +60,69 @@ function emitTs(ast) {
     "",
   ];
 
-  const allTypes = ast.interfaces.flatMap((iface) => iface.types);
+  // Per-interface namespacing prevents collisions across the canonical
+  // interface set — agent / approval / elicit all define `record
+  // response`, and all three must be addressable. Build an owner index
+  // so cross-interface references can fully qualify
+  // (e.g. `types.Message` inside the `llm` namespace).
+  const typeOwner = new Map();
+  for (const iface of ast.interfaces) {
+    for (const t of iface.types) {
+      typeOwner.set(t.name, kebabToSnake(iface.name));
+    }
+  }
 
-  for (const t of allTypes) {
-    if (t.doc) emitDoc(lines, t.doc);
-    if (t.kind === "record") emitRecord(lines, t);
-    else if (t.kind === "enum") emitEnum(lines, t);
-    else if (t.kind === "variant") emitVariant(lines, t);
-    else if (t.kind === "flags") emitFlags(lines, t);
+  for (const iface of ast.interfaces) {
+    const ns = kebabToSnake(iface.name);
+    lines.push(`/** Types generated from the \`${iface.name}\` WIT interface. */`);
+    lines.push(`export namespace ${ns} {`);
+    for (const t of iface.types) {
+      if (t.doc) emitDoc(lines, t.doc, "  ");
+      if (t.kind === "record") emitRecord(lines, t, typeOwner, ns);
+      else if (t.kind === "enum") emitEnum(lines, t);
+      else if (t.kind === "variant") emitVariant(lines, t, typeOwner, ns);
+      else if (t.kind === "flags") emitFlags(lines, t);
+      lines.push("");
+    }
+    lines.push(`}`);
     lines.push("");
   }
 
   return lines.join("\n");
 }
 
-function emitRecord(lines, t) {
-  lines.push(`export interface ${kebabToPascal(t.name)} {`);
+function emitRecord(lines, t, typeOwner, currentNs) {
+  lines.push(`  export interface ${kebabToPascal(t.name)} {`);
   for (const f of t.fields) {
-    if (f.doc) emitDoc(lines, f.doc, "  ");
+    if (f.doc) emitDoc(lines, f.doc, "    ");
     const fieldName = kebabToSnake(f.name);
     const isOption = f.type.kind === "option";
-    const renderedType = renderType(isOption ? f.type.inner : f.type);
+    const renderedType = renderType(isOption ? f.type.inner : f.type, typeOwner, currentNs);
     if (isOption) {
-      lines.push(`  ${fieldName}?: ${renderedType};`);
+      lines.push(`    ${fieldName}?: ${renderedType};`);
     } else {
-      lines.push(`  ${fieldName}: ${renderedType};`);
+      lines.push(`    ${fieldName}: ${renderedType};`);
     }
   }
-  lines.push(`}`);
+  lines.push(`  }`);
 }
 
 function emitEnum(lines, t) {
   const variants = t.cases.map((c) => JSON.stringify(kebabToSnake(c.name))).join(" | ");
-  lines.push(`export type ${kebabToPascal(t.name)} = ${variants};`);
+  lines.push(`  export type ${kebabToPascal(t.name)} = ${variants};`);
 }
 
-function emitVariant(lines, t) {
+function emitVariant(lines, t, typeOwner, currentNs) {
   // Mirror serde(tag = "tag", content = "value") — see wit_events.rs
   // line 113. Wire format: `{ tag: "case-name", value?: T }`.
   const cases = t.cases.map((c) => {
     const tag = kebabToSnake(c.name);
     if (c.type === undefined) return `{ tag: ${JSON.stringify(tag)} }`;
-    return `{ tag: ${JSON.stringify(tag)}; value: ${renderType(c.type)} }`;
+    return `{ tag: ${JSON.stringify(tag)}; value: ${renderType(c.type, typeOwner, currentNs)} }`;
   });
-  lines.push(`export type ${kebabToPascal(t.name)} =`);
+  lines.push(`  export type ${kebabToPascal(t.name)} =`);
   for (let i = 0; i < cases.length; i++) {
-    lines.push(`  | ${cases[i]}${i === cases.length - 1 ? ";" : ""}`);
+    lines.push(`    | ${cases[i]}${i === cases.length - 1 ? ";" : ""}`);
   }
 }
 
@@ -114,22 +131,29 @@ function emitFlags(lines, t) {
   // `type X = XFlag[]; type XFlag = "case" | ...`.
   const flagName = kebabToPascal(t.name) + "Flag";
   const flagUnion = t.cases.map((c) => JSON.stringify(kebabToSnake(c.name))).join(" | ");
-  lines.push(`export type ${flagName} = ${flagUnion};`);
-  lines.push(`export type ${kebabToPascal(t.name)} = ${flagName}[];`);
+  lines.push(`  export type ${flagName} = ${flagUnion};`);
+  lines.push(`  export type ${kebabToPascal(t.name)} = ${flagName}[];`);
 }
 
-function renderType(ty) {
+function renderType(ty, typeOwner, currentNs) {
   switch (ty.kind) {
     case "builtin":
       return renderBuiltin(ty.name);
     case "option":
-      return `${renderType(ty.inner)} | undefined`;
+      return `${renderType(ty.inner, typeOwner, currentNs)} | undefined`;
     case "list":
-      return `${renderType(ty.inner)}[]`;
+      return `${renderType(ty.inner, typeOwner, currentNs)}[]`;
     case "tuple":
-      return `[${ty.elems.map(renderType).join(", ")}]`;
-    case "named":
-      return kebabToPascal(ty.name);
+      return `[${ty.elems.map((e) => renderType(e, typeOwner, currentNs)).join(", ")}]`;
+    case "named": {
+      const pascal = kebabToPascal(ty.name);
+      // If the type lives in another interface, fully qualify so the
+      // reference resolves under the parent module instead of looking
+      // for it inside the current namespace.
+      const owner = typeOwner && typeOwner.get(ty.name);
+      if (owner && owner !== currentNs) return `${owner}.${pascal}`;
+      return pascal;
+    }
     case "unknown":
       return "unknown";
     default:
