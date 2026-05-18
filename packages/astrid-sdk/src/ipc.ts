@@ -31,7 +31,22 @@ import { SysError, callHost } from "./errors.js";
 export interface IpcMessage {
   topic: string;
   payload: string;
+  /** UUID of the capsule that published this message. */
   sourceId: string;
+  /**
+   * Principal attributed to the publisher of this message.
+   *
+   * For messages published via {@link publish}, this is the publishing
+   * capsule's invocation principal. For messages published via
+   * `publishAs` (uplinks), this is the principal the uplink claimed.
+   *
+   * `undefined` for system / kernel-originated events with no
+   * attributable principal, and for legacy messages that predate this
+   * field. Subscribers processing multi-message batches should read
+   * this per-message rather than relying on `runtime.caller()` (which
+   * only reflects the first message's publisher).
+   */
+  principal: string | undefined;
   /** Convenience: parse `payload` as JSON. Throws SysError.json on failure. */
   json<T = unknown>(): T;
 }
@@ -159,17 +174,25 @@ export class Subscription {
 
 function envelopeToPollResult(env: IpcEnvelope): PollResult {
   return {
-    messages: env.messages.map((m) => makeIpcMessage(m.topic, m.payload, m.sourceId)),
+    messages: env.messages.map((m) =>
+      makeIpcMessage(m.topic, m.payload, m.sourceId, m.principal),
+    ),
     dropped: env.dropped,
     lagged: env.lagged,
   };
 }
 
-function makeIpcMessage(topic: string, payload: string, sourceId: string): IpcMessage {
+function makeIpcMessage(
+  topic: string,
+  payload: string,
+  sourceId: string,
+  principal: string | undefined,
+): IpcMessage {
   return {
     topic,
     payload,
     sourceId,
+    principal,
     json<T = unknown>(): T {
       try {
         return JSON.parse(payload) as T;

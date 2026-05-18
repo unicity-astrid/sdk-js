@@ -73,6 +73,8 @@ declare module "astrid:capsule/ipc@0.1.0" {
     topic: string;
     payload: string;
     sourceId: string;
+    /** Principal attributed to the publisher (canonical WIT PR #4). `undefined` for kernel-originated events or legacy messages. */
+    principal: string | undefined;
   }
 
   export interface IpcEnvelope {
