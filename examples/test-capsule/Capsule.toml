@@ -1,0 +1,19 @@
+[package]
+name = "test-capsule"
+version = "0.0.0"
+description = "Phase 1 JS/TS SDK vertical-slice test capsule."
+authors = ["Joshua J. Bouw <dev@joshuajbouw.com>"]
+astrid-version = ">=0.5.0"
+
+[[component]]
+id = "test-capsule"
+file = "test-capsule.wasm"
+type = "executable"
+
+[capabilities]
+ipc_publish = ["tool.v1.execute.*", "test.v1.event.*"]
+kv = ["*"]
+
+[[interceptor]]
+event = "test.v1.event"
+action = "test.v1.event"

@@ -1,0 +1,17 @@
+{
+  "name": "test-capsule",
+  "version": "0.0.0",
+  "description": "Phase 1 vertical-slice test capsule. Mirrors the Rust sdk-rust/examples/test-capsule but limited to the minimal subset (increment + get_counter + install + upgrade).",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@astrid-os/sdk": "*"
+  },
+  "devDependencies": {
+    "@astrid-os/build": "*",
+    "typescript": "^5.6.0"
+  }
+}

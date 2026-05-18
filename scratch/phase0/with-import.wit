@@ -1,0 +1,19 @@
+package phase0:with-import@0.1.0;
+
+interface host {
+    enum log-level {
+        info,
+        warn,
+        error,
+    }
+
+    log: func(level: log-level, message: string);
+    add: func(a: u32, b: u32) -> u32;
+}
+
+world capsule {
+    import host;
+
+    export greet: func() -> string;
+    export run-tests: func() -> string;
+}

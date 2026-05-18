@@ -1,0 +1,8 @@
+node_modules/
+dist/
+gen/
+target/
+*.log
+.DS_Store
+scratch/*/dist/
+scratch/*/node_modules/

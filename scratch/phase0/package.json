@@ -1,0 +1,17 @@
+{
+  "name": "astrid-sdk-js-phase0-scratch",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 toolchain validation. Throwaway: validates that ComponentizeJS works against our WIT, and discovers the host-import binding shape jco emits.",
+  "scripts": {
+    "build:hello": "node build-hello.mjs",
+    "build:with-import": "node build-with-import.mjs",
+    "build:full-wit": "node build-full-wit.mjs",
+    "inspect": "wasm-tools component wit"
+  },
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "^0.18.0",
+    "@bytecodealliance/jco": "^1.13.0"
+  }
+}

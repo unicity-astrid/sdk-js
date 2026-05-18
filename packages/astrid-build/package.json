@@ -1,0 +1,24 @@
+{
+  "name": "@astrid-os/build",
+  "version": "0.1.0-alpha.0",
+  "description": "Build orchestrator that turns a TS/JS Astrid capsule project into a wasm32-wasip2 component.",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "bin": {
+    "astrid-js-build": "./src/index.mjs"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "build": "echo 'no build step — pure ESM'"
+  },
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "^0.18.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

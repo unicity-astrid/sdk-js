@@ -1,0 +1,38 @@
+{
+  "name": "@astrid-os/sdk",
+  "version": "0.1.0-alpha.0",
+  "description": "System SDK for building user-space capsules for Astrid OS in JavaScript and TypeScript.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts.d.ts",
+      "import": "./dist/contracts.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "wit-contracts"
+  ],
+  "scripts": {
+    "prebuild": "node scripts/generate-contracts.mjs",
+    "build": "tsc -b",
+    "clean": "rm -rf dist src/contracts.ts"
+  },
+  "devDependencies": {
+    "@astrid-os/build": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
