@@ -164,6 +164,46 @@ export function tryAccept(listener: ListenerHandle): StreamHandle | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Outbound TCP — STUB pending host fn
+// ---------------------------------------------------------------------------
+
+/**
+ * Open an outbound TCP connection to `host:port`.
+ *
+ * The returned {@link StreamHandle} flows through the same `recv` /
+ * `tryRecv` / `send` / `close` API as the `accept` path — Astrid's host
+ * ABI keeps inbound and outbound on one stream-handle type.
+ *
+ * **Stubbed today.** The host fn `astrid:capsule/net.net-connect-tcp`
+ * has not landed yet. See:
+ *
+ * - Tracking issue: https://github.com/unicity-astrid/astrid/issues/745
+ * - RFC: https://github.com/unicity-astrid/rfcs/pull/27
+ *
+ * Capsules can import this and write against the final API today; the
+ * call throws a clearly-marked `SysError.api` until the host side lands.
+ * Once it does, the body becomes a one-line `callHost` matching the
+ * existing `accept` / `bindUnix` pattern.
+ *
+ * @param host Hostname or IP. Must be in the capsule's `net_connect`
+ *   capability allowlist in `Capsule.toml`.
+ * @param port TCP port (1–65535). Must match the allowlist pattern.
+ */
+export function connect(host: string, port: number): StreamHandle {
+  // Real impl, pending astrid#745:
+  //   const id = callHost(
+  //     `net.connect(${JSON.stringify(host)}, ${port})`,
+  //     () => hostConnectTcp(host, port),
+  //   );
+  //   return new StreamHandle(id);
+  throw SysError.api(
+    `net.connect(${JSON.stringify(host)}, ${port}): outbound TCP host fn not yet implemented ` +
+      `(tracking: https://github.com/unicity-astrid/astrid/issues/745, ` +
+      `RFC: https://github.com/unicity-astrid/rfcs/pull/27)`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Sleep shim
 // ---------------------------------------------------------------------------
 
