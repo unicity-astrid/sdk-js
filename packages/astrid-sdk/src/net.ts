@@ -15,7 +15,22 @@ import {
   netWrite as hostWrite,
   netCloseStream as hostCloseStream,
   netConnectTcp as hostConnectTcp,
+  netReadBytes as hostReadBytes,
+  netWriteBytes as hostWriteBytes,
+  netPeek as hostPeek,
+  netShutdown as hostShutdown,
+  netPeerAddr as hostPeerAddr,
+  netLocalAddr as hostLocalAddr,
+  netSetNodelay as hostSetNodelay,
+  netNodelay as hostNodelay,
+  netSetReadTimeout as hostSetReadTimeout,
+  netReadTimeout as hostReadTimeout,
+  netSetWriteTimeout as hostSetWriteTimeout,
+  netWriteTimeout as hostWriteTimeout,
+  netSetTtl as hostSetTtl,
+  netTtl as hostTtl,
   type NetReadStatus,
+  type ShutdownHow,
 } from "astrid:capsule/net@0.1.0";
 import { clockMs as hostClockMs } from "astrid:capsule/sys@0.1.0";
 import { SysError, callHost } from "./errors.js";
@@ -109,6 +124,115 @@ export class StreamHandle {
       // read; here we surface SendError to match the Rust SDK.
       throw new SendError();
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Byte-stream surface (mirrors std::net::TcpStream / std::io::Read+Write)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read up to `maxBytes` without length-prefix framing. Mirrors
+   * `std::net::TcpStream::read`. Returns an empty Uint8Array on EOF.
+   * Honours any timeout set via {@link setReadTimeout}.
+   */
+  readBytes(maxBytes: number): Uint8Array {
+    this.#requireOpen();
+    return callHost(`net.readBytes(${this.id}, ${maxBytes})`, () =>
+      hostReadBytes(this.id, maxBytes),
+    );
+  }
+
+  /**
+   * Write `data` without framing. Returns bytes written (may be less than
+   * `data.length` when the kernel's socket buffer is full). Honours any
+   * timeout set via {@link setWriteTimeout}.
+   */
+  writeBytes(data: Uint8Array): number {
+    this.#requireOpen();
+    return callHost(`net.writeBytes(${this.id})`, () => hostWriteBytes(this.id, data));
+  }
+
+  /**
+   * Peek up to `maxBytes` without consuming them — the next
+   * {@link readBytes} returns the same data again.
+   */
+  peek(maxBytes: number): Uint8Array {
+    this.#requireOpen();
+    return callHost(`net.peek(${this.id}, ${maxBytes})`, () => hostPeek(this.id, maxBytes));
+  }
+
+  /** Half-close the read side, write side, or both. */
+  shutdown(how: ShutdownHow): void {
+    this.#requireOpen();
+    callHost(`net.shutdown(${this.id}, ${how})`, () => hostShutdown(this.id, how));
+  }
+
+  /** Remote peer address as `"ip:port"`. */
+  peerAddr(): string {
+    this.#requireOpen();
+    return callHost(`net.peerAddr(${this.id})`, () => hostPeerAddr(this.id));
+  }
+
+  /** Local socket address as `"ip:port"`. */
+  localAddr(): string {
+    this.#requireOpen();
+    return callHost(`net.localAddr(${this.id})`, () => hostLocalAddr(this.id));
+  }
+
+  /** Toggle `TCP_NODELAY` (Nagle's algorithm off when `true`). */
+  setNodelay(nodelay: boolean): void {
+    this.#requireOpen();
+    callHost(`net.setNodelay(${this.id}, ${nodelay})`, () => hostSetNodelay(this.id, nodelay));
+  }
+
+  /** Current `TCP_NODELAY` setting. */
+  nodelay(): boolean {
+    this.#requireOpen();
+    return callHost(`net.nodelay(${this.id})`, () => hostNodelay(this.id));
+  }
+
+  /** Set the read timeout (milliseconds). `undefined` clears it. */
+  setReadTimeout(timeoutMs: number | undefined): void {
+    this.#requireOpen();
+    const ms = timeoutMs === undefined ? undefined : BigInt(timeoutMs);
+    callHost(`net.setReadTimeout(${this.id}, ${timeoutMs})`, () =>
+      hostSetReadTimeout(this.id, ms),
+    );
+  }
+
+  /** Current read timeout in milliseconds, or `undefined` if unset. */
+  readTimeout(): number | undefined {
+    this.#requireOpen();
+    const v = callHost(`net.readTimeout(${this.id})`, () => hostReadTimeout(this.id));
+    return v === undefined ? undefined : Number(v);
+  }
+
+  /** Set the write timeout (milliseconds). `undefined` clears it. */
+  setWriteTimeout(timeoutMs: number | undefined): void {
+    this.#requireOpen();
+    const ms = timeoutMs === undefined ? undefined : BigInt(timeoutMs);
+    callHost(`net.setWriteTimeout(${this.id}, ${timeoutMs})`, () =>
+      hostSetWriteTimeout(this.id, ms),
+    );
+  }
+
+  /** Current write timeout in milliseconds, or `undefined` if unset. */
+  writeTimeout(): number | undefined {
+    this.#requireOpen();
+    const v = callHost(`net.writeTimeout(${this.id})`, () => hostWriteTimeout(this.id));
+    return v === undefined ? undefined : Number(v);
+  }
+
+  /** Set the IP `TTL` on outgoing packets. */
+  setTtl(ttl: number): void {
+    this.#requireOpen();
+    callHost(`net.setTtl(${this.id}, ${ttl})`, () => hostSetTtl(this.id, ttl));
+  }
+
+  /** Current IP `TTL`. */
+  ttl(): number {
+    this.#requireOpen();
+    return callHost(`net.ttl(${this.id})`, () => hostTtl(this.id));
   }
 
   close(): void {
