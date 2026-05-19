@@ -60,6 +60,26 @@ export class SendError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate + convert a timeout to the host's `bigint | undefined`.
+ * Mirrors Rust SDK's `to_host_timeout`. Rejects `0` (would be
+ * ambiguous with "no timeout") matching
+ * `std::net::TcpStream::set_read_timeout`'s `Duration::ZERO` rule.
+ */
+function toHostTimeout(timeoutMs: number | undefined): bigint | undefined {
+  if (timeoutMs === undefined) return undefined;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw SysError.api(
+      `timeout must be a positive integer (got ${timeoutMs}); use undefined to clear`,
+    );
+  }
+  return BigInt(Math.floor(timeoutMs));
+}
+
+// ---------------------------------------------------------------------------
 // Handles
 // ---------------------------------------------------------------------------
 
@@ -132,8 +152,15 @@ export class StreamHandle {
 
   /**
    * Read up to `maxBytes` without length-prefix framing. Mirrors
-   * `std::net::TcpStream::read`. Returns an empty Uint8Array on EOF.
-   * Honours any timeout set via {@link setReadTimeout}.
+   * `std::net::TcpStream::read`.
+   *
+   * Contract:
+   * - **Empty Uint8Array = EOF** (peer disconnected). Unambiguous.
+   * - Non-empty = data read (may be shorter than `maxBytes`).
+   * - Throws `SysError` with message containing `"would block"` if a
+   *   read timeout was set via {@link setReadTimeout} and expired
+   *   with no data. With no timeout set, blocks until data, EOF, or
+   *   capsule unload.
    */
   readBytes(maxBytes: number): Uint8Array {
     this.#requireOpen();
@@ -145,7 +172,8 @@ export class StreamHandle {
   /**
    * Write `data` without framing. Returns bytes written (may be less than
    * `data.length` when the kernel's socket buffer is full). Honours any
-   * timeout set via {@link setWriteTimeout}.
+   * timeout set via {@link setWriteTimeout}; with no timeout set, blocks
+   * until the write completes or the peer disconnects.
    */
   writeBytes(data: Uint8Array): number {
     this.#requireOpen();
@@ -154,7 +182,8 @@ export class StreamHandle {
 
   /**
    * Peek up to `maxBytes` without consuming them — the next
-   * {@link readBytes} returns the same data again.
+   * {@link readBytes} returns the same data again. Same EOF /
+   * would-block semantics as {@link readBytes}.
    */
   peek(maxBytes: number): Uint8Array {
     this.#requireOpen();
@@ -191,10 +220,15 @@ export class StreamHandle {
     return callHost(`net.nodelay(${this.id})`, () => hostNodelay(this.id));
   }
 
-  /** Set the read timeout (milliseconds). `undefined` clears it. */
+  /**
+   * Set the read timeout (milliseconds). `undefined` clears the
+   * timeout (reads block indefinitely). `0` is rejected — matches
+   * `std::net::TcpStream::set_read_timeout` which errors on
+   * `Duration::ZERO`.
+   */
   setReadTimeout(timeoutMs: number | undefined): void {
     this.#requireOpen();
-    const ms = timeoutMs === undefined ? undefined : BigInt(timeoutMs);
+    const ms = toHostTimeout(timeoutMs);
     callHost(`net.setReadTimeout(${this.id}, ${timeoutMs})`, () =>
       hostSetReadTimeout(this.id, ms),
     );
@@ -207,10 +241,14 @@ export class StreamHandle {
     return v === undefined ? undefined : Number(v);
   }
 
-  /** Set the write timeout (milliseconds). `undefined` clears it. */
+  /**
+   * Set the write timeout (milliseconds). `undefined` clears it;
+   * `0` is rejected (matches
+   * `std::net::TcpStream::set_write_timeout`).
+   */
   setWriteTimeout(timeoutMs: number | undefined): void {
     this.#requireOpen();
-    const ms = timeoutMs === undefined ? undefined : BigInt(timeoutMs);
+    const ms = toHostTimeout(timeoutMs);
     callHost(`net.setWriteTimeout(${this.id}, ${timeoutMs})`, () =>
       hostSetWriteTimeout(this.id, ms),
     );
