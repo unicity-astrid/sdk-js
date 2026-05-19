@@ -129,12 +129,29 @@ declare module "astrid:capsule/net@0.1.0" {
     | { tag: "closed" }
     | { tag: "pending" };
 
+  export type ShutdownHow = "read" | "write" | "both";
+
   export function netBindUnix(listenerHandle: bigint): bigint;
   export function netAccept(listenerHandle: bigint): bigint;
   export function netPollAccept(listenerHandle: bigint): bigint | undefined;
   export function netRead(streamHandle: bigint): NetReadStatus;
   export function netWrite(streamHandle: bigint, data: Uint8Array): void;
   export function netCloseStream(streamHandle: bigint): void;
+  export function netConnectTcp(host: string, port: number): bigint;
+  export function netReadBytes(streamHandle: bigint, maxBytes: number): Uint8Array;
+  export function netWriteBytes(streamHandle: bigint, data: Uint8Array): number;
+  export function netPeek(streamHandle: bigint, maxBytes: number): Uint8Array;
+  export function netShutdown(streamHandle: bigint, how: ShutdownHow): void;
+  export function netPeerAddr(streamHandle: bigint): string;
+  export function netLocalAddr(streamHandle: bigint): string;
+  export function netSetNodelay(streamHandle: bigint, nodelay: boolean): void;
+  export function netNodelay(streamHandle: bigint): boolean;
+  export function netSetReadTimeout(streamHandle: bigint, timeoutMs: bigint | undefined): void;
+  export function netReadTimeout(streamHandle: bigint): bigint | undefined;
+  export function netSetWriteTimeout(streamHandle: bigint, timeoutMs: bigint | undefined): void;
+  export function netWriteTimeout(streamHandle: bigint): bigint | undefined;
+  export function netSetTtl(streamHandle: bigint, ttl: number): void;
+  export function netTtl(streamHandle: bigint): number;
 }
 
 // ----------------------------------------------------------------------
