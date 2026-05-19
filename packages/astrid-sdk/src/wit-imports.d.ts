@@ -135,6 +135,7 @@ declare module "astrid:capsule/net@0.1.0" {
   export function netRead(streamHandle: bigint): NetReadStatus;
   export function netWrite(streamHandle: bigint, data: Uint8Array): void;
   export function netCloseStream(streamHandle: bigint): void;
+  export function netConnectTcp(host: string, port: number): bigint;
 }
 
 // ----------------------------------------------------------------------

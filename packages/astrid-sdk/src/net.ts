@@ -14,6 +14,7 @@ import {
   netRead as hostRead,
   netWrite as hostWrite,
   netCloseStream as hostCloseStream,
+  netConnectTcp as hostConnectTcp,
   type NetReadStatus,
 } from "astrid:capsule/net@0.1.0";
 import { clockMs as hostClockMs } from "astrid:capsule/sys@0.1.0";
@@ -174,33 +175,31 @@ export function tryAccept(listener: ListenerHandle): StreamHandle | undefined {
  * `tryRecv` / `send` / `close` API as the `accept` path — Astrid's host
  * ABI keeps inbound and outbound on one stream-handle type.
  *
- * **Stubbed today.** The host fn `astrid:capsule/net.net-connect-tcp`
- * has not landed yet. See:
+ * The kernel runs three checks before the TCP syscall:
  *
- * - Tracking issue: https://github.com/unicity-astrid/astrid/issues/745
- * - RFC: https://github.com/unicity-astrid/rfcs/pull/27
+ * 1. The capsule's `net_connect` allowlist in `Capsule.toml` must
+ *    contain a pattern matching `"host:port"` (exact) or `"host:*"`
+ *    (any port for the named host). Missing or empty list denies all
+ *    outbound TCP (fail-closed).
+ * 2. DNS resolution rejects loopback, private, link-local, multicast,
+ *    and unspecified IPs (same airlock as `http.request`).
+ * 3. Per-capsule active-stream cap (default 8, shared with inbound
+ *    `accept`).
  *
- * Capsules can import this and write against the final API today; the
- * call throws a clearly-marked `SysError.api` until the host side lands.
- * Once it does, the body becomes a one-line `callHost` matching the
- * existing `accept` / `bindUnix` pattern.
+ * Connect attempts are bounded to ~10s by the host. A stalled DNS or
+ * TCP handshake surfaces as a `SysError`, not an indefinite hang.
  *
- * @param host Hostname or IP. Must be in the capsule's `net_connect`
- *   capability allowlist in `Capsule.toml`.
- * @param port TCP port (1–65535). Must match the allowlist pattern.
+ * @param host Hostname or IP, matched against the manifest allowlist.
+ * @param port TCP port (1–65535).
+ *
+ * Tracking issue: https://github.com/unicity-astrid/astrid/issues/745
+ * RFC: https://github.com/unicity-astrid/rfcs/pull/27
  */
 export function connect(host: string, port: number): StreamHandle {
-  // Real impl, pending astrid#745:
-  //   const id = callHost(
-  //     `net.connect(${JSON.stringify(host)}, ${port})`,
-  //     () => hostConnectTcp(host, port),
-  //   );
-  //   return new StreamHandle(id);
-  throw SysError.api(
-    `net.connect(${JSON.stringify(host)}, ${port}): outbound TCP host fn not yet implemented ` +
-      `(tracking: https://github.com/unicity-astrid/astrid/issues/745, ` +
-      `RFC: https://github.com/unicity-astrid/rfcs/pull/27)`,
+  const id = callHost(`net.connect(${JSON.stringify(host)}, ${port})`, () =>
+    hostConnectTcp(host, port),
   );
+  return new StreamHandle(id);
 }
 
 // ---------------------------------------------------------------------------
