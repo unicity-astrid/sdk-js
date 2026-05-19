@@ -124,18 +124,11 @@ declare module "astrid:capsule/fs@0.1.0" {
 // astrid:capsule/net
 // ----------------------------------------------------------------------
 declare module "astrid:capsule/net@0.1.0" {
-  export type NetReadStatus =
-    | { tag: "data"; value: Uint8Array }
-    | { tag: "closed" }
-    | { tag: "pending" };
-
   export type ShutdownHow = "read" | "write" | "both";
 
   export function netBindUnix(listenerHandle: bigint): bigint;
   export function netAccept(listenerHandle: bigint): bigint;
   export function netPollAccept(listenerHandle: bigint): bigint | undefined;
-  export function netRead(streamHandle: bigint): NetReadStatus;
-  export function netWrite(streamHandle: bigint, data: Uint8Array): void;
   export function netCloseStream(streamHandle: bigint): void;
   export function netConnectTcp(host: string, port: number): bigint;
   export function netReadBytes(streamHandle: bigint, maxBytes: number): Uint8Array;

@@ -49,13 +49,7 @@ export type {
   FetchInit,
   FetchResponse,
 } from "./http.js";
-export type {
-  ListenerHandle,
-  StreamHandle,
-  RecvError,
-  SendError,
-  TryRecvError,
-} from "./net.js";
+export type { ListenerHandle, StreamHandle } from "./net.js";
 export type { ProcessResult, ProcessLogs, KillResult, BackgroundProcessHandle } from "./process.js";
 export type { CallerContext } from "./runtime.js";
 export type { ResolvedUser, Link } from "./identity.js";
