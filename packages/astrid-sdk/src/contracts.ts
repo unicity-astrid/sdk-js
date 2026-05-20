@@ -627,3 +627,258 @@ export namespace user {
   }
 
 }
+
+/** Types generated from the `users` WIT interface. */
+export namespace users {
+  /**
+   * Multi-tenant request envelope.
+   * 
+   * Carries provenance ("which uplink, on behalf of which end-user")
+   * and a correlation token so the originating uplink can match the
+   * response back to the inflight request among many concurrent
+   * end-users on a single principal.
+   * 
+   * Pending the broader admin-API correlation convention (kernel
+   * issue #748), `source` lives on this interface; once that
+   * convention formalizes a shared envelope, this record migrates
+   * to the shared location and the records below import it instead.
+   */
+  export interface Source {
+    /**
+     * Originating channel — e.g. `"cli"`, `"sphere"`, `"discord"`,
+     * `"telegram"`. Free-form string the uplink fills in for
+     * audit and routing.
+     */
+    channel: string;
+    /**
+     * AstridUserId of the requester when known. `None` for system
+     * flows or pre-login pairing requests.
+     */
+    user_id?: string;
+    /**
+     * Correlation token. The requester subscribes to the response
+     * topic and filters incoming responses by this string.
+     */
+    correlation_id: string;
+  }
+
+  /**
+   * Canonical Astrid user identity.
+   * 
+   * One record per human within the principal's user directory.
+   * `id` is the stable UUID — every `frontend-link` points at this.
+   */
+  export interface AstridUser {
+    /** UUID v4 string (lowercase, hyphenated). */
+    id: string;
+    /** Optional ed25519 public key (32 bytes raw). */
+    public_key?: number[];
+    /**
+     * Optional human-readable display name. Unique within a
+     * principal is recommended but not enforced — the name index
+     * is last-writer-wins.
+     */
+    display_name?: string;
+    /** Creation timestamp, RFC 3339 string. */
+    created_at: string;
+  }
+
+  /**
+   * A platform-to-Astrid-user identity link.
+   * 
+   * Composite key: `(platform, platform-user-id)`. Exactly one link
+   * may exist per pair; relinking overwrites.
+   */
+  export interface FrontendLink {
+    /**
+     * Normalized platform name (lowercased, trimmed) —
+     * e.g. `"discord"`, `"telegram"`, `"nostr"`.
+     */
+    platform: string;
+    /** Platform-specific user identifier. Opaque to the capsule. */
+    platform_user_id: string;
+    /** The Astrid user UUID this platform identity maps to. */
+    astrid_user_id: string;
+    /** When this link was created (RFC 3339). */
+    linked_at: string;
+    /**
+     * How this link was established — e.g. `"admin"`, `"system"`,
+     * `"chat_command"`, `"passkey"`. Recorded for audit.
+     */
+    method: string;
+  }
+
+  /**
+   * Resolve a platform identity to an Astrid user.
+   * Topic: `users.v1.resolve.request`.
+   */
+  export interface ResolveRequest {
+    source: Source;
+    /** Platform name (normalized lowercased before lookup). */
+    platform: string;
+    /** Platform-specific user identifier. */
+    platform_user_id: string;
+  }
+
+  /**
+   * Response for resolve.
+   * Topic: `users.v1.resolve.response`.
+   * 
+   * A clean "no link exists" is `user = none` with `error = none`.
+   * Validation or storage failures populate `error` and leave
+   * `user = none`.
+   */
+  export interface ResolveResponse {
+    correlation_id: string;
+    user?: AstridUser;
+    error?: string;
+  }
+
+  /**
+   * Link a platform identity to an existing Astrid user.
+   * Upsert semantics: an existing link for the same
+   * `(platform, platform-user-id)` pair is overwritten.
+   * Topic: `users.v1.link.request`.
+   */
+  export interface LinkRequest {
+    source: Source;
+    platform: string;
+    platform_user_id: string;
+    /** Target Astrid user UUID. The user must already exist. */
+    astrid_user_id: string;
+    /** Audit string — how this link was established. */
+    method: string;
+  }
+
+  /**
+   * Response for link.
+   * Topic: `users.v1.link.response`.
+   */
+  export interface LinkResponse {
+    correlation_id: string;
+    link?: FrontendLink;
+    error?: string;
+  }
+
+  /**
+   * Remove a platform link.
+   * Topic: `users.v1.unlink.request`.
+   */
+  export interface UnlinkRequest {
+    source: Source;
+    platform: string;
+    platform_user_id: string;
+  }
+
+  /**
+   * Response for unlink.
+   * Topic: `users.v1.unlink.response`.
+   */
+  export interface UnlinkResponse {
+    correlation_id: string;
+    /**
+     * `true` if a link existed and was removed; `false` for a
+     * no-op delete (link was already absent).
+     */
+    removed: boolean;
+    error?: string;
+  }
+
+  /**
+   * Create a new Astrid user.
+   * Topic: `users.v1.create.request`.
+   */
+  export interface CreateRequest {
+    source: Source;
+    /** Optional display name. Rejected if it contains `/` or `\0`. */
+    display_name?: string;
+  }
+
+  /**
+   * Response for create.
+   * Topic: `users.v1.create.response`.
+   */
+  export interface CreateResponse {
+    correlation_id: string;
+    user?: AstridUser;
+    error?: string;
+  }
+
+  /**
+   * List every platform link for one Astrid user.
+   * Topic: `users.v1.links.request`.
+   */
+  export interface LinksRequest {
+    source: Source;
+    astrid_user_id: string;
+  }
+
+  /**
+   * Response for links.
+   * Topic: `users.v1.links.response`.
+   */
+  export interface LinksResponse {
+    correlation_id: string;
+    links: FrontendLink[];
+    error?: string;
+  }
+
+  /**
+   * Fetch a user record by UUID.
+   * Topic: `users.v1.get.request`.
+   */
+  export interface GetRequest {
+    source: Source;
+    astrid_user_id: string;
+  }
+
+  /**
+   * Response for get.
+   * Topic: `users.v1.get.response`.
+   */
+  export interface GetResponse {
+    correlation_id: string;
+    user?: AstridUser;
+    error?: string;
+  }
+
+  /**
+   * Delete a user and every platform link pointing at it.
+   * Idempotent — deleting an absent UUID returns `deleted = false`.
+   * Topic: `users.v1.delete.request`.
+   */
+  export interface DeleteRequest {
+    source: Source;
+    astrid_user_id: string;
+  }
+
+  /**
+   * Response for delete.
+   * Topic: `users.v1.delete.response`.
+   */
+  export interface DeleteResponse {
+    correlation_id: string;
+    /** `true` when a user record existed and was deleted. */
+    deleted: boolean;
+    error?: string;
+  }
+
+  /**
+   * List every user record in the principal's store.
+   * Topic: `users.v1.list.request`.
+   */
+  export interface ListRequest {
+    source: Source;
+  }
+
+  /**
+   * Response for list.
+   * Topic: `users.v1.list.response`.
+   */
+  export interface ListResponse {
+    correlation_id: string;
+    users: AstridUser[];
+    error?: string;
+  }
+
+}
