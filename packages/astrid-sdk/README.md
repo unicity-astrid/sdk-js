@@ -15,7 +15,7 @@ Capsule code (TypeScript or JavaScript)
     |
   @astrid-os/sdk           typed modules: fs, net, ipc, kv, http, ...
     |
-  WIT-imported bindings    "astrid:capsule/<iface>@0.1.0" (ComponentizeJS-generated)
+  WIT-imported bindings    "astrid:<domain>/host@1.0.0" + "astrid:io/*@1.0.0" (ComponentizeJS-generated)
     |
   Kernel                   capability checks, VFS, IPC bus, audit
 ```
@@ -36,7 +36,6 @@ The SDK never reaches the network, filesystem, or any external service directly.
 | `kv` | `astrid_sdk::kv` | Map-shape async: `get<T>(key)`/`set<T>`/`has`/`del`/`listKeys`/`clearPrefix`; raw byte variants for non-JSON payloads |
 | `http` | `astrid_sdk::http` (mirrors reqwest) | Builder `Request.get/post/header/json/setBody` + `send` / `streamStart`; plus a WHATWG `fetch` polyfill that routes through the same host imports for capability-gated network access |
 | `runtime` | `astrid_sdk::runtime` | `signalReady()`, `caller() → CallerContext`, `socketPath()` |
-| `hooks` | `astrid_sdk::hooks` | `trigger(eventJson) → string` |
 | `capabilities` | `astrid_sdk::capabilities` | `check(sourceUuid, capability) → boolean` |
 | `elicit` | `astrid_sdk::elicit` | `secret`/`hasSecret`/`text`/`textWithDefault`/`select`/`array` (install/upgrade only) |
 | `identity` | `astrid_sdk::identity` | `resolve`/`link`/`unlink`/`createUser`/`listLinks` |

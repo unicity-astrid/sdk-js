@@ -23,7 +23,7 @@ import { componentize } from "@bytecodealliance/componentize-js";
 import * as esbuild from "esbuild";
 import { codegenWitEvents } from "./wit-codegen.mjs";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, stat, rm, copyFile, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -33,8 +33,10 @@ import ts from "typescript";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SDK_PKG_DIR = resolve(HERE, "..", "..", "astrid-sdk");
 // Canonical host ABI lives in the unicity-astrid/wit submodule (mounted at
-// repo-root/contracts/). The SDK no longer ships its own copy of
-// astrid-capsule.wit — it reads directly from the submodule.
+// repo-root/contracts/). Post per-domain WIT split (PR #752), each domain
+// is a separate `astrid:<domain>/host@1.0.0` package plus the foundation
+// `astrid:io/*@1.0.0` interfaces; componentize-js resolves the world the
+// capsule declares by reading every file in this directory.
 const REPO_ROOT = resolve(HERE, "..", "..", "..");
 const CANONICAL_WIT_DIR = resolve(REPO_ROOT, "contracts", "host");
 
@@ -164,7 +166,7 @@ export function astridUpgrade() {
 /**
  * Bundle the generated entry into a single ESM file. ComponentizeJS can't
  * resolve bare-specifier imports (`@astrid-os/sdk`); esbuild inlines
- * everything except the WIT-resolved `astrid:capsule/*` imports.
+ * everything except the WIT-resolved `astrid:*` imports.
  */
 async function bundle(entryPath, projectDir) {
   const genDir = dirname(entryPath);
@@ -177,7 +179,9 @@ async function bundle(entryPath, projectDir) {
     target: "es2022",
     outfile: bundlePath,
     // Mark WIT module specifiers as external so esbuild doesn't try to
-    // resolve them — ComponentizeJS owns those imports.
+    // resolve them — ComponentizeJS owns those imports. Post per-domain WIT
+    // split, the specifiers are `astrid:<domain>/host@1.0.0` and
+    // `astrid:io/<iface>@1.0.0`; the bare `astrid:*` glob covers both.
     external: ["astrid:*"],
     // Working dir resolution: esbuild needs to look in the project's
     // node_modules to find @astrid-os/sdk via the workspace symlink.
@@ -193,22 +197,100 @@ async function bundle(entryPath, projectDir) {
 }
 
 function resolveWitPath() {
-  // Read straight from the canonical `unicity-astrid/wit` submodule.
-  // The kernel side (cargo-published `astrid-sys` crate) also has to keep
-  // an in-tree copy because `cargo package` only bundles files inside the
-  // crate dir — but the JS SDK has no such constraint, so we consume the
-  // submodule directly and skip the drift surface entirely.
-  if (!existsSync(join(CANONICAL_WIT_DIR, "astrid-capsule.wit"))) {
+  // Read straight from the canonical `unicity-astrid/wit` submodule. The
+  // kernel side (cargo-published `astrid-sys` crate) keeps an in-tree copy
+  // because `cargo package` only bundles files inside the crate dir; the
+  // JS SDK has no such constraint, so we consume the submodule directly
+  // and skip the drift surface entirely. Sanity-check that the per-domain
+  // split landed — `ipc@1.0.0.wit` is the canary file that appears on the
+  // new layout but never the old.
+  if (!existsSync(join(CANONICAL_WIT_DIR, "ipc@1.0.0.wit"))) {
     die(
-      `canonical host WIT missing at ${CANONICAL_WIT_DIR}/astrid-capsule.wit. ` +
-        `Run 'git submodule update --init --recursive' from the sdk-js repo root.`,
+      `canonical host WIT missing or pre-split at ${CANONICAL_WIT_DIR}. ` +
+        `Expected per-domain layout from unicity-astrid/wit; run 'git submodule update --init --recursive' from the sdk-js repo root.`,
     );
   }
   return CANONICAL_WIT_DIR;
 }
 
-async function runComponentize(entryPath, outPath) {
-  const witPath = resolveWitPath();
+/**
+ * Stage the canonical host WIT files into a synthesized deps tree that
+ * componentize-js can resolve, then emit a single `astrid-sdk:capsule` world
+ * that imports every per-domain host package and includes every guest export
+ * world. Mirrors the Rust SDK's `astrid-sys` synthetic world (see
+ * `sdk-rust/astrid-sys/src/lib.rs`) so the two SDKs target the same world.
+ *
+ * Layout produced under `<projectDir>/gen/wit/`:
+ *
+ *   capsule.wit                    (the synthetic world)
+ *   deps/astrid-io/io@1.0.0.wit
+ *   deps/astrid-fs/fs@1.0.0.wit
+ *   deps/astrid-ipc/ipc@1.0.0.wit
+ *   ... (one dir per per-domain package)
+ *   deps/astrid-guest/guest@1.0.0.wit
+ *
+ * The deps/ dir is the WIT convention componentize-js / wit-bindgen uses to
+ * find external packages.
+ */
+async function stageCapsuleWit(projectDir) {
+  const witDir = join(projectDir, "gen", "wit");
+  const depsDir = join(witDir, "deps");
+  await rm(witDir, { recursive: true, force: true });
+  await mkdir(depsDir, { recursive: true });
+
+  // Map of <wit-file-name> → <deps subdir name> (the bare package name
+  // without the version is the conventional subdir).
+  const hostFiles = await readdir(CANONICAL_WIT_DIR);
+  const stagedPkgs = [];
+  for (const fname of hostFiles) {
+    if (!fname.endsWith(".wit")) continue;
+    // `ipc@1.0.0.wit` → bare package "ipc"
+    const bare = fname.replace(/@.*$/, "");
+    const subdir = join(depsDir, `astrid-${bare}`);
+    await mkdir(subdir, { recursive: true });
+    await copyFile(join(CANONICAL_WIT_DIR, fname), join(subdir, fname));
+    stagedPkgs.push(bare);
+  }
+
+  const world = `// Auto-generated by @astrid-os/build. Do not edit by hand.
+//
+// Synthetic capsule world combining every frozen per-domain host import
+// plus every guest export world. Mirrors the Rust SDK's astrid-sys
+// synthetic world so capsules built with either SDK target the same world.
+
+package astrid-sdk:capsule;
+
+world capsule {
+    import astrid:io/error@1.0.0;
+    import astrid:io/poll@1.0.0;
+    import astrid:io/streams@1.0.0;
+
+    import astrid:fs/host@1.0.0;
+    import astrid:ipc/host@1.0.0;
+    import astrid:kv/host@1.0.0;
+    import astrid:net/host@1.0.0;
+    import astrid:http/host@1.0.0;
+    import astrid:sys/host@1.0.0;
+    import astrid:process/host@1.0.0;
+    import astrid:uplink/host@1.0.0;
+    import astrid:elicit/host@1.0.0;
+    import astrid:approval/host@1.0.0;
+    import astrid:identity/host@1.0.0;
+
+    include astrid:guest/interceptor@1.0.0;
+    include astrid:guest/background@1.0.0;
+    include astrid:guest/installable@1.0.0;
+    include astrid:guest/upgradable@1.0.0;
+}
+`;
+  await writeFile(join(witDir, "capsule.wit"), world);
+  return witDir;
+}
+
+async function runComponentize(entryPath, outPath, projectDir) {
+  // Sanity-check the canonical host WIT exists before staging.
+  resolveWitPath();
+  const witPath = await stageCapsuleWit(projectDir);
   const t0 = performance.now();
   const { component, imports } = await componentize({
     sourcePath: entryPath,
@@ -254,7 +336,7 @@ async function main() {
   const bundledPath = await bundle(entrySrcPath, projectDir);
   console.log(`astrid-js-build: bundled = ${bundledPath}`);
   console.log("astrid-js-build: running componentize-js...");
-  const result = await runComponentize(bundledPath, outPath);
+  const result = await runComponentize(bundledPath, outPath, projectDir);
   console.log(
     `astrid-js-build: wrote ${outPath} (${(result.bytes / 1024 / 1024).toFixed(2)} MB, ${result.componentizeSec}s, ${result.importCount} host imports)`,
   );

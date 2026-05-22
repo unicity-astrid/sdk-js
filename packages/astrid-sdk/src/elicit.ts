@@ -2,12 +2,21 @@
  * Interactive user input during install/upgrade. Mirrors `astrid_sdk::elicit`.
  *
  * These functions are only callable from `@install` / `@upgrade` lifecycle
- * methods; calling them from a tool or interceptor returns a host error.
- * The host blocks the WASM thread until the frontend (TUI / CLI) collects
- * input and publishes a response, or the request times out (120s).
+ * methods; calling them from a tool or interceptor returns `not-in-lifecycle`.
+ * The host blocks the WASM thread until the frontend collects input or the
+ * request times out (120s).
+ *
+ * Post per-domain WIT split, the host returns a typed `elicit-response`
+ * variant directly. We unpack it into the language-natural shape: `text` /
+ * `textWithDefault` / `select` return strings; `array` returns string[];
+ * `secret` returns void (the value never leaves the SecretStore).
  */
 
-import { elicit as hostElicit, hasSecret as hostHasSecret } from "astrid:capsule/elicit@0.1.0";
+import {
+  elicit as hostElicit,
+  hasSecret as hostHasSecret,
+  type ElicitResponse,
+} from "astrid:elicit/host@1.0.0";
 import { SysError, callHost } from "./errors.js";
 
 function validateKey(key: string): void {
@@ -18,28 +27,24 @@ function validateKey(key: string): void {
 
 /**
  * Store a secret via the kernel's SecretStore. The capsule NEVER receives
- * the value back — verify via `hasSecret(key)` and dereference at runtime
+ * the value back — verify via {@link hasSecret} and dereference at runtime
  * by name.
  */
 export function secret(key: string, description: string): void {
   validateKey(key);
-  const respStr = callHost(`elicit.secret(${JSON.stringify(key)})`, () =>
+  const resp = callHost(`elicit.secret(${JSON.stringify(key)})`, () =>
     hostElicit({
-      elicitType: "secret",
+      kind: "secret",
       key,
       description,
       options: undefined,
       defaultValue: undefined,
     }),
   );
-  let resp: { ok?: boolean };
-  try {
-    resp = JSON.parse(respStr) as { ok?: boolean };
-  } catch (err) {
-    throw SysError.json(`elicit.secret: malformed host response: ${(err as Error).message}`, err);
-  }
-  if (resp.ok !== true) {
-    throw SysError.api("kernel did not confirm secret storage");
+  if (resp.tag !== "secret-stored") {
+    throw SysError.api(
+      `elicit.secret: expected 'secret-stored' response, got '${resp.tag}'`,
+    );
   }
 }
 
@@ -55,7 +60,11 @@ export function text(key: string, description: string): string {
 }
 
 /** Prompt with a pre-filled default. */
-export function textWithDefault(key: string, description: string, defaultValue: string): string {
+export function textWithDefault(
+  key: string,
+  description: string,
+  defaultValue: string,
+): string {
   return elicitText(key, description, defaultValue);
 }
 
@@ -65,71 +74,63 @@ export function select(key: string, description: string, options: string[]): str
   if (options.length === 0) {
     throw SysError.api("elicit.select requires at least one option");
   }
-  const respStr = callHost(`elicit.select(${JSON.stringify(key)})`, () =>
+  const resp = callHost(`elicit.select(${JSON.stringify(key)})`, () =>
     hostElicit({
-      elicitType: "select",
+      kind: "select",
       key,
       description,
       options,
       defaultValue: undefined,
     }),
   );
-  const resp = parseStringResp("elicit.select", respStr);
-  if (options.indexOf(resp) < 0) {
+  const value = expectValue("elicit.select", resp);
+  if (options.indexOf(value) < 0) {
     throw SysError.api(
-      `host returned value not in provided options: ${resp.slice(0, 64)}`,
+      `host returned value not in provided options: ${value.slice(0, 64)}`,
     );
   }
-  return resp;
+  return value;
 }
 
 /** Prompt for multiple text values. */
 export function array(key: string, description: string): string[] {
   validateKey(key);
-  const respStr = callHost(`elicit.array(${JSON.stringify(key)})`, () =>
+  const resp = callHost(`elicit.array(${JSON.stringify(key)})`, () =>
     hostElicit({
-      elicitType: "array",
+      kind: "array",
       key,
       description,
       options: undefined,
       defaultValue: undefined,
     }),
   );
-  let resp: { values?: string[] };
-  try {
-    resp = JSON.parse(respStr) as { values?: string[] };
-  } catch (err) {
-    throw SysError.json(`elicit.array: malformed host response: ${(err as Error).message}`, err);
+  if (resp.tag !== "values") {
+    throw SysError.api(`elicit.array: expected 'values' response, got '${resp.tag}'`);
   }
-  if (!Array.isArray(resp.values)) {
-    throw SysError.api(`elicit.array: host returned no values array`);
-  }
-  return resp.values;
+  return resp.val;
 }
 
-function elicitText(key: string, description: string, defaultValue: string | undefined): string {
+function elicitText(
+  key: string,
+  description: string,
+  defaultValue: string | undefined,
+): string {
   validateKey(key);
-  const respStr = callHost(`elicit.text(${JSON.stringify(key)})`, () =>
+  const resp = callHost(`elicit.text(${JSON.stringify(key)})`, () =>
     hostElicit({
-      elicitType: "text",
+      kind: "text",
       key,
       description,
       options: undefined,
       defaultValue,
     }),
   );
-  return parseStringResp("elicit.text", respStr);
+  return expectValue("elicit.text", resp);
 }
 
-function parseStringResp(label: string, raw: string): string {
-  let resp: { value?: string };
-  try {
-    resp = JSON.parse(raw) as { value?: string };
-  } catch (err) {
-    throw SysError.json(`${label}: malformed host response: ${(err as Error).message}`, err);
+function expectValue(label: string, resp: ElicitResponse): string {
+  if (resp.tag !== "value") {
+    throw SysError.api(`${label}: expected 'value' response, got '${resp.tag}'`);
   }
-  if (typeof resp.value !== "string") {
-    throw SysError.api(`${label}: host returned no value field`);
-  }
-  return resp.value;
+  return resp.val;
 }

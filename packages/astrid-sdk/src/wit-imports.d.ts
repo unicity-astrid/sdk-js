@@ -1,32 +1,440 @@
 // Ambient type declarations for the Astrid host imports that ComponentizeJS
-// resolves at componentize time. The JS-side import shape is
-// `"astrid:capsule/<interface>@<version>"` with kebab-case function names
-// converted to camelCase, per Phase 0 findings.
+// resolves at componentize time. After PR #752 (kernel) the host ABI is split
+// into per-domain frozen packages at @1.0.0, and foundation I/O lives in the
+// dedicated `astrid:io` package.
 //
-// One ambient module per WIT interface. Version is always `@0.1.0` because
-// our `astrid-capsule.wit` declares `package astrid:capsule@0.1.0`. Per
-// Phase 0, omitting the version causes a Wizer-time "module not found"
-// error.
+// The JS-side import shape is `"astrid:<domain>/host@1.0.0"` (or
+// `"astrid:io/<iface>@1.0.0"` for foundation primitives), with kebab-case WIT
+// names mapped to camelCase per the ComponentizeJS bindgen convention. WIT
+// resources surface as JS classes with private constructors, instance methods,
+// and a `[Symbol.dispose]` registered automatically by the host runtime.
+//
+// Per-domain `error-code` variants are imported as discriminated `{ tag, val }`
+// objects matching the bindgen output. Throwing host calls reject with the
+// same shape — `errors.ts` catches and rewraps into `SysError` so capsules see
+// a unified error class with a typed `code`.
+//
+// One ambient module per WIT interface. Version is always `@1.0.0` after the
+// per-domain split. Omitting the version causes a Wizer-time "module not
+// found" error (see Phase 0 findings).
 
-// ----------------------------------------------------------------------
-// astrid:capsule/types — shared records used across interfaces
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/types@0.1.0" {
-  // No re-exported types are needed by the SDK — interfaces below re-import
-  // the records they use directly. Kept as an alias module so the WIT
-  // resolution path doesn't fail when a guest references `use types.{...}`.
+// ────────────────────────────────────────────────────────────────────
+// astrid:io/error — downcastable error resource
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:io/error@1.0.0" {
+  export class Error {
+    private constructor();
+    toDebugString(): string;
+    [Symbol.dispose](): void;
+  }
 }
 
-// ----------------------------------------------------------------------
-// astrid:capsule/sys
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/sys@0.1.0" {
-  export type LogLevel =
+// ────────────────────────────────────────────────────────────────────
+// astrid:io/poll — readiness multiplexing
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:io/poll@1.0.0" {
+  export type ErrorCode =
+    | { tag: "invalid-input" }
+    | { tag: "closed" }
+    | { tag: "too-large" }
+    | { tag: "cancelled" }
+    | { tag: "unknown"; val: string };
+
+  export class Pollable {
+    private constructor();
+    ready(): boolean;
+    block(): void;
+    [Symbol.dispose](): void;
+  }
+
+  export function poll(pollables: Pollable[]): Uint32Array;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:io/streams — byte streams
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:io/streams@1.0.0" {
+  import type { Error as IoError } from "astrid:io/error@1.0.0";
+  import type { Pollable } from "astrid:io/poll@1.0.0";
+
+  export type StreamError =
+    | { tag: "last-operation-failed"; val: IoError }
+    | { tag: "closed" };
+
+  export class InputStream {
+    private constructor();
+    read(len: bigint): Uint8Array;
+    blockingRead(len: bigint): Uint8Array;
+    skip(len: bigint): bigint;
+    blockingSkip(len: bigint): bigint;
+    subscribe(): Pollable;
+    [Symbol.dispose](): void;
+  }
+
+  export class OutputStream {
+    private constructor();
+    checkWrite(): bigint;
+    write(contents: Uint8Array): void;
+    blockingWriteAndFlush(contents: Uint8Array): void;
+    flush(): void;
+    blockingFlush(): void;
+    subscribe(): Pollable;
+    writeZeroes(len: bigint): void;
+    blockingWriteZeroesAndFlush(len: bigint): void;
+    splice(src: InputStream, len: bigint): bigint;
+    blockingSplice(src: InputStream, len: bigint): bigint;
+    [Symbol.dispose](): void;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:ipc/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:ipc/host@1.0.0" {
+  import type { Pollable } from "astrid:io/poll@1.0.0";
+
+  export type ErrorCode =
+    | { tag: "capability-denied" }
+    | { tag: "invalid-input" }
+    | { tag: "closed" }
+    | { tag: "rate-limited" }
+    | { tag: "backpressure" }
+    | { tag: "quota" }
+    | { tag: "timeout" }
+    | { tag: "unknown"; val: string };
+
+  export type PrincipalAttribution =
+    | { tag: "verified"; val: string }
+    | { tag: "claimed"; val: string }
+    | { tag: "system" };
+
+  export interface IpcMessage {
+    topic: string;
+    payload: string;
+    sourceId: string;
+    principal: PrincipalAttribution;
+  }
+
+  export interface IpcEnvelope {
+    messages: IpcMessage[];
+    dropped: bigint;
+    lagged: bigint;
+  }
+
+  export interface InterceptorBinding {
+    handleId: bigint;
+    action: string;
+    topic: string;
+  }
+
+  export class Subscription {
+    private constructor();
+    poll(): IpcEnvelope;
+    recv(timeoutMs: bigint): IpcEnvelope;
+    subscribeReadiness(): Pollable;
+    [Symbol.dispose](): void;
+  }
+
+  export function publish(topic: string, payload: string): void;
+  export function publishAs(topic: string, payload: string, principal: string): void;
+  export function subscribe(topicPattern: string): Subscription;
+  export function getInterceptorBindings(): InterceptorBinding[];
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:kv/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:kv/host@1.0.0" {
+  export type ErrorCode =
+    | { tag: "invalid-key" }
+    | { tag: "too-large" }
+    | { tag: "quota" }
+    | { tag: "cas-mismatch" }
+    | { tag: "unknown"; val: string };
+
+  export interface KeyPage {
+    keys: string[];
+    nextCursor: string | undefined;
+  }
+
+  export function kvGet(key: string): Uint8Array | undefined;
+  export function kvSet(key: string, value: Uint8Array): void;
+  export function kvDelete(key: string): void;
+  export function kvListKeys(prefix: string): string[];
+  export function kvListKeysPage(
+    prefix: string,
+    cursor: string | undefined,
+    limit: number,
+  ): KeyPage;
+  export function kvClearPrefix(prefix: string): bigint;
+  export function kvCas(
+    key: string,
+    expected: Uint8Array | undefined,
+    newValue: Uint8Array,
+  ): boolean;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:fs/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:fs/host@1.0.0" {
+  export type ErrorCode =
+    | { tag: "not-found" }
+    | { tag: "access" }
+    | { tag: "capability-denied" }
+    | { tag: "boundary-escape" }
+    | { tag: "invalid-path" }
+    | { tag: "would-block" }
+    | { tag: "is-directory" }
+    | { tag: "not-directory" }
+    | { tag: "not-empty" }
+    | { tag: "too-large" }
+    | { tag: "quota" }
+    | { tag: "cross-vfs" }
+    | { tag: "already-exists" }
+    | { tag: "closed" }
+    | { tag: "unknown"; val: string };
+
+  export type FileType =
+    | "type-unknown"
+    | "regular"
+    | "directory"
+    | "symlink"
+    | "block-device"
+    | "character-device"
+    | "fifo"
+    | "socket";
+
+  export type OpenMode = "read" | "write" | "append" | "read-write";
+
+  export interface Datetime {
+    seconds: bigint;
+    nanoseconds: number;
+  }
+
+  export interface FileStat {
+    size: bigint;
+    kind: FileType;
+    mode: number;
+    modified: Datetime | undefined;
+    created: Datetime | undefined;
+    accessed: Datetime | undefined;
+  }
+
+  export class FileHandle {
+    private constructor();
+    readAt(offset: bigint, maxBytes: number): Uint8Array;
+    writeAt(offset: bigint, data: Uint8Array): number;
+    syncData(): void;
+    syncAll(): void;
+    stat(): FileStat;
+    setLen(size: bigint): void;
+    [Symbol.dispose](): void;
+  }
+
+  export function fsOpen(path: string, mode: OpenMode): FileHandle;
+  export function fsExists(path: string): boolean;
+  export function fsMkdir(path: string): void;
+  export function fsMkdirAll(path: string): void;
+  export function fsReaddir(path: string): string[];
+  export function fsStat(path: string): FileStat;
+  export function fsStatSymlink(path: string): FileStat;
+  export function fsUnlink(path: string): void;
+  export function readFile(path: string): Uint8Array;
+  export function writeFile(path: string, content: Uint8Array): void;
+  export function fsAppend(path: string, content: Uint8Array): void;
+  export function fsCopy(src: string, dst: string): void;
+  export function fsRename(src: string, dst: string): void;
+  export function fsRemoveDirAll(path: string): bigint;
+  export function fsCanonicalize(path: string): string;
+  export function fsReadLink(path: string): string;
+  export function fsHardLink(src: string, linkPath: string): void;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:net/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:net/host@1.0.0" {
+  import type { Pollable } from "astrid:io/poll@1.0.0";
+  import type { InputStream, OutputStream } from "astrid:io/streams@1.0.0";
+
+  export type ErrorCode =
+    | { tag: "would-block" }
+    | { tag: "closed" }
+    | { tag: "capability-denied" }
+    | { tag: "airlock-rejected" }
+    | { tag: "connection-refused" }
+    | { tag: "connection-reset" }
+    | { tag: "timeout" }
+    | { tag: "address-in-use" }
+    | { tag: "address-not-available" }
+    | { tag: "name-unresolvable" }
+    | { tag: "invalid-handle" }
+    | { tag: "not-tcp" }
+    | { tag: "quota" }
+    | { tag: "unknown"; val: string };
+
+  export type NetReadStatus =
+    | { tag: "data"; val: Uint8Array }
+    | { tag: "closed" }
+    | { tag: "pending" };
+
+  export type ShutdownHow = "receive" | "send" | "both";
+
+  export interface UdpDatagram {
+    data: Uint8Array;
+    peerHost: string;
+    peerPort: number;
+  }
+
+  export class UnixListener {
+    private constructor();
+    accept(): TcpStream;
+    pollAccept(timeoutMs: bigint): TcpStream | undefined;
+    subscribeReadiness(): Pollable;
+    [Symbol.dispose](): void;
+  }
+
+  export class TcpListener {
+    private constructor();
+    accept(): TcpStream;
+    pollAccept(timeoutMs: bigint): TcpStream | undefined;
+    localAddr(): string;
+    subscribeReadiness(): Pollable;
+    [Symbol.dispose](): void;
+  }
+
+  export class TcpStream {
+    private constructor();
+    read(): NetReadStatus;
+    write(data: Uint8Array): void;
+    readBytes(maxBytes: number): Uint8Array;
+    writeBytes(data: Uint8Array): number;
+    peek(maxBytes: number): Uint8Array;
+    shutdown(how: ShutdownHow): void;
+    peerAddr(): string;
+    localAddr(): string;
+    setNodelay(nodelay: boolean): void;
+    nodelay(): boolean;
+    setReadTimeout(timeoutMs: bigint | undefined): void;
+    readTimeout(): bigint | undefined;
+    setWriteTimeout(timeoutMs: bigint | undefined): void;
+    writeTimeout(): bigint | undefined;
+    setHopLimit(hops: number): void;
+    hopLimit(): number;
+    setKeepalive(keepaliveSecs: bigint | undefined): void;
+    keepalive(): bigint | undefined;
+    setLinger(lingerMs: bigint | undefined): void;
+    linger(): bigint | undefined;
+    setReuseaddr(reuse: boolean): void;
+    reuseaddr(): boolean;
+    subscribeReadable(): Pollable;
+    readStream(): InputStream;
+    writeStream(): OutputStream;
+    [Symbol.dispose](): void;
+  }
+
+  export class UdpSocket {
+    private constructor();
+    sendTo(data: Uint8Array, peerHost: string, peerPort: number): number;
+    recvFrom(maxBytes: number): UdpDatagram | undefined;
+    connect(peerHost: string, peerPort: number): void;
+    disconnect(): void;
+    send(data: Uint8Array): number;
+    recv(maxBytes: number): Uint8Array | undefined;
+    peerAddr(): string | undefined;
+    setReadTimeout(timeoutMs: bigint | undefined): void;
+    localAddr(): string;
+    subscribeReadable(): Pollable;
+    [Symbol.dispose](): void;
+  }
+
+  export function bindUnix(): UnixListener;
+  export function bindTcp(host: string, port: number): TcpListener;
+  export function connectTcp(host: string, port: number): TcpStream;
+  export function udpBind(host: string, port: number): UdpSocket;
+  export function lookupHost(host: string): string[];
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:http/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:http/host@1.0.0" {
+  import type { Pollable } from "astrid:io/poll@1.0.0";
+  import type { InputStream } from "astrid:io/streams@1.0.0";
+
+  export type ErrorCode =
+    | { tag: "capability-denied" }
+    | { tag: "invalid-request" }
+    | { tag: "dns-error" }
+    | { tag: "airlock-rejected" }
+    | { tag: "tls-error" }
+    | { tag: "timeout" }
+    | { tag: "connection-error" }
+    | { tag: "body-too-large" }
+    | { tag: "closed" }
+    | { tag: "quota" }
+    | { tag: "protocol"; val: string }
+    | { tag: "unknown"; val: string };
+
+  export type HttpMethod =
+    | { tag: "get" }
+    | { tag: "head" }
+    | { tag: "post" }
+    | { tag: "put" }
+    | { tag: "delete" }
+    | { tag: "connect" }
+    | { tag: "options" }
     | { tag: "trace" }
-    | { tag: "debug" }
-    | { tag: "info" }
-    | { tag: "warn" }
-    | { tag: "error" };
+    | { tag: "patch" }
+    | { tag: "other"; val: string };
+
+  export interface KeyValuePair {
+    key: string;
+    value: string;
+  }
+
+  export interface HttpRequestData {
+    url: string;
+    method: HttpMethod;
+    headers: KeyValuePair[];
+    body: Uint8Array | undefined;
+  }
+
+  export interface HttpResponseData {
+    status: number;
+    headers: KeyValuePair[];
+    body: Uint8Array;
+  }
+
+  export class HttpStream {
+    private constructor();
+    status(): number;
+    headers(): KeyValuePair[];
+    readChunk(): Uint8Array;
+    close(): void;
+    subscribeReadable(): Pollable;
+    bodyStream(): InputStream;
+    [Symbol.dispose](): void;
+  }
+
+  export function httpRequest(request: HttpRequestData): HttpResponseData;
+  export function httpStreamStart(request: HttpRequestData): HttpStream;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:sys/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:sys/host@1.0.0" {
+  export type ErrorCode =
+    | { tag: "capability-denied" }
+    | { tag: "config-key-reserved" }
+    | { tag: "too-large" }
+    | { tag: "registry-unavailable" }
+    | { tag: "cancelled" }
+    | { tag: "unknown"; val: string };
+
+  export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
   export interface CallerContext {
     principal: string | undefined;
@@ -43,236 +451,203 @@ declare module "astrid:capsule/sys@0.1.0" {
     allowed: boolean;
   }
 
+  export function getConfig(key: string): string | undefined;
+  export function getCaller(): CallerContext;
   export function log(level: LogLevel, message: string): void;
   export function signalReady(): void;
   export function clockMs(): bigint;
-  export function getCaller(): CallerContext;
-  export function getConfig(key: string): string;
-  export function triggerHook(requestJson: string): string;
+  export function clockMonotonicNs(): bigint;
+  export function sleepNs(durationNs: bigint): void;
+  export function randomBytes(length: bigint): Uint8Array;
   export function checkCapsuleCapability(
     request: CapabilityCheckRequest,
   ): CapabilityCheckResponse;
 }
 
-// ----------------------------------------------------------------------
-// astrid:capsule/kv
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/kv@0.1.0" {
-  export function kvGet(key: string): Uint8Array | undefined;
-  export function kvSet(key: string, value: Uint8Array): void;
-  export function kvDelete(key: string): void;
-  export function kvListKeys(prefix: string): string[];
-  export function kvClearPrefix(prefix: string): bigint;
-}
+// ────────────────────────────────────────────────────────────────────
+// astrid:process/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:process/host@1.0.0" {
+  import type { Pollable } from "astrid:io/poll@1.0.0";
 
-// ----------------------------------------------------------------------
-// astrid:capsule/ipc
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/ipc@0.1.0" {
-  export interface IpcMessage {
-    topic: string;
-    payload: string;
-    sourceId: string;
-    /** Principal attributed to the publisher (canonical WIT PR #4). `undefined` for kernel-originated events or legacy messages. */
-    principal: string | undefined;
-  }
-
-  export interface IpcEnvelope {
-    messages: IpcMessage[];
-    dropped: bigint;
-    lagged: bigint;
-  }
-
-  export interface InterceptorHandle {
-    handleId: bigint;
-    action: string;
-    topic: string;
-  }
-
-  export function ipcPublish(topic: string, payload: string): void;
-  // `ipc-publish-as` lives on sdk-rust's feat/ipc-publish-as branch but
-  // hasn't landed in the kernel WIT yet. Re-enable when the kernel side
-  // is wired up — see TODO in src/ipc.ts.
-  // export function ipcPublishAs(topic: string, payload: string, principal: string): void;
-  export function ipcSubscribe(topicPattern: string): bigint;
-  export function ipcUnsubscribe(handleId: bigint): void;
-  export function ipcPoll(handleId: bigint): IpcEnvelope;
-  export function ipcRecv(handleId: bigint, timeoutMs: bigint): IpcEnvelope;
-  export function getInterceptorHandles(): InterceptorHandle[];
-}
-
-// ----------------------------------------------------------------------
-// astrid:capsule/fs
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/fs@0.1.0" {
-  export interface FileStat {
-    size: bigint;
-    isDir: boolean;
-    mtime: bigint | undefined;
-  }
-
-  export function fsExists(path: string): boolean;
-  export function fsMkdir(path: string): void;
-  export function fsReaddir(path: string): string[];
-  export function fsStat(path: string): FileStat;
-  export function fsUnlink(path: string): void;
-  export function readFile(path: string): Uint8Array;
-  export function writeFile(path: string, content: Uint8Array): void;
-}
-
-// ----------------------------------------------------------------------
-// astrid:capsule/net
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/net@0.1.0" {
-  export type NetReadStatus =
-    | { tag: "data"; value: Uint8Array }
+  export type ErrorCode =
+    | { tag: "capability-denied" }
+    | { tag: "invalid-input" }
+    | { tag: "boundary-escape" }
+    | { tag: "quota" }
+    | { tag: "too-large" }
     | { tag: "closed" }
-    | { tag: "pending" };
+    | { tag: "cancelled" }
+    | { tag: "wait-timeout" }
+    | { tag: "unknown"; val: string };
 
-  export type ShutdownHow = "read" | "write" | "both";
+  export type ProcessSignal = "term" | "hup" | "usr1" | "usr2" | "int";
 
-  export function netBindUnix(listenerHandle: bigint): bigint;
-  export function netAccept(listenerHandle: bigint): bigint;
-  export function netPollAccept(listenerHandle: bigint): bigint | undefined;
-  export function netRead(streamHandle: bigint): NetReadStatus;
-  export function netWrite(streamHandle: bigint, data: Uint8Array): void;
-  export function netCloseStream(streamHandle: bigint): void;
-  export function netConnectTcp(host: string, port: number): bigint;
-  export function netReadBytes(streamHandle: bigint, maxBytes: number): Uint8Array;
-  export function netWriteBytes(streamHandle: bigint, data: Uint8Array): number;
-  export function netPeek(streamHandle: bigint, maxBytes: number): Uint8Array;
-  export function netShutdown(streamHandle: bigint, how: ShutdownHow): void;
-  export function netPeerAddr(streamHandle: bigint): string;
-  export function netLocalAddr(streamHandle: bigint): string;
-  export function netSetNodelay(streamHandle: bigint, nodelay: boolean): void;
-  export function netNodelay(streamHandle: bigint): boolean;
-  export function netSetReadTimeout(streamHandle: bigint, timeoutMs: bigint | undefined): void;
-  export function netReadTimeout(streamHandle: bigint): bigint | undefined;
-  export function netSetWriteTimeout(streamHandle: bigint, timeoutMs: bigint | undefined): void;
-  export function netWriteTimeout(streamHandle: bigint): bigint | undefined;
-  export function netSetTtl(streamHandle: bigint, ttl: number): void;
-  export function netTtl(streamHandle: bigint): number;
-}
-
-// ----------------------------------------------------------------------
-// astrid:capsule/http
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/http@0.1.0" {
-  export interface KeyValuePair {
+  export interface EnvVar {
     key: string;
     value: string;
   }
 
-  export interface HttpRequestData {
-    url: string;
-    method: string;
-    headers: KeyValuePair[];
-    body: string | undefined;
-  }
-
-  export interface HttpResponseData {
-    status: number;
-    headers: KeyValuePair[];
-    body: Uint8Array;
-  }
-
-  export interface HttpStreamStartResponse {
-    handle: bigint;
-    status: number;
-    headers: KeyValuePair[];
-  }
-
-  export function httpRequest(request: HttpRequestData): HttpResponseData;
-  export function httpStreamStart(request: HttpRequestData): HttpStreamStartResponse;
-  export function httpStreamRead(streamHandle: bigint): Uint8Array;
-  export function httpStreamClose(streamHandle: bigint): void;
-}
-
-// ----------------------------------------------------------------------
-// astrid:capsule/process
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/process@0.1.0" {
   export interface SpawnRequest {
     cmd: string;
     args: string[];
+    stdin: Uint8Array | undefined;
+    env: EnvVar[];
+    cwd: string | undefined;
+  }
+
+  export interface ExitInfo {
+    exitCode: number | undefined;
+    signal: number | undefined;
   }
 
   export interface ProcessResult {
     stdout: string;
     stderr: string;
-    exitCode: number;
-  }
-
-  export interface SpawnBackgroundResult {
-    id: bigint;
+    exit: ExitInfo;
   }
 
   export interface ReadLogsResult {
     stdout: string;
     stderr: string;
     running: boolean;
-    exitCode: number | undefined;
+    exit: ExitInfo | undefined;
   }
 
-  export interface KillProcessResult {
+  export interface KillResult {
     killed: boolean;
-    exitCode: number | undefined;
+    exit: ExitInfo | undefined;
     stdout: string;
     stderr: string;
   }
 
+  export class ProcessHandle {
+    private constructor();
+    readLogs(): ReadLogsResult;
+    writeStdin(data: Uint8Array): number;
+    closeStdin(): void;
+    signal(sig: ProcessSignal): void;
+    kill(): KillResult;
+    wait(timeoutMs: bigint | undefined): ExitInfo;
+    waitWithOutput(timeoutMs: bigint | undefined): ProcessResult;
+    osPid(): number;
+    subscribeExit(): Pollable;
+    subscribeLogs(): Pollable;
+    [Symbol.dispose](): void;
+  }
+
   export function spawn(request: SpawnRequest): ProcessResult;
-  export function spawnBackground(request: SpawnRequest): SpawnBackgroundResult;
-  export function readLogs(processId: bigint): ReadLogsResult;
-  export function kill(processId: bigint): KillProcessResult;
+  export function spawnBackground(request: SpawnRequest): ProcessHandle;
 }
 
-// ----------------------------------------------------------------------
-// astrid:capsule/elicit
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/elicit@0.1.0" {
+// ────────────────────────────────────────────────────────────────────
+// astrid:uplink/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:uplink/host@1.0.0" {
+  export type ErrorCode =
+    | { tag: "capability-denied" }
+    | { tag: "invalid-input" }
+    | { tag: "invalid-profile" }
+    | { tag: "unknown-uplink" }
+    | { tag: "no-session" }
+    | { tag: "quota" }
+    | { tag: "unknown"; val: string };
+
+  export type UplinkProfile = "chat" | "interactive" | "notify" | "bridge";
+
+  export function uplinkRegister(
+    name: string,
+    platform: string,
+    profile: UplinkProfile,
+  ): string;
+  export function uplinkSend(
+    uplinkId: string,
+    platformUserId: string,
+    content: string,
+  ): boolean;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// astrid:elicit/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:elicit/host@1.0.0" {
+  export type ErrorCode =
+    | { tag: "not-in-lifecycle" }
+    | { tag: "timeout" }
+    | { tag: "cancelled" }
+    | { tag: "invalid-input" }
+    | { tag: "store-unavailable" }
+    | { tag: "unknown"; val: string };
+
+  export type ElicitType = "text" | "secret" | "select" | "array";
+
   export interface ElicitRequest {
-    elicitType: string;
+    kind: ElicitType;
     key: string;
     description: string;
     options: string[] | undefined;
     defaultValue: string | undefined;
   }
 
-  export function elicit(request: ElicitRequest): string;
+  export type ElicitResponse =
+    | { tag: "value"; val: string }
+    | { tag: "values"; val: string[] }
+    | { tag: "secret-stored" };
+
+  export function elicit(request: ElicitRequest): ElicitResponse;
   export function hasSecret(key: string): boolean;
 }
 
-// ----------------------------------------------------------------------
-// astrid:capsule/approval
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/approval@0.1.0" {
+// ────────────────────────────────────────────────────────────────────
+// astrid:approval/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:approval/host@1.0.0" {
+  export type ErrorCode =
+    | { tag: "invalid-input" }
+    | { tag: "timeout" }
+    | { tag: "store-unavailable" }
+    | { tag: "unknown"; val: string };
+
+  export type ApprovalDecision =
+    | "denied"
+    | "approved"
+    | "approved-session"
+    | "approved-always"
+    | "allowance";
+
   export interface ApprovalRequest {
     action: string;
     targetResource: string;
   }
 
   export interface ApprovalResponse {
-    approved: boolean;
+    decision: ApprovalDecision;
   }
 
   export function requestApproval(request: ApprovalRequest): ApprovalResponse;
 }
 
-// ----------------------------------------------------------------------
-// astrid:capsule/identity
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/identity@0.1.0" {
+// ────────────────────────────────────────────────────────────────────
+// astrid:identity/host
+// ────────────────────────────────────────────────────────────────────
+declare module "astrid:identity/host@1.0.0" {
+  export type ErrorCode =
+    | { tag: "capability-denied" }
+    | { tag: "invalid-input" }
+    | { tag: "user-not-found" }
+    | { tag: "link-not-found" }
+    | { tag: "already-linked" }
+    | { tag: "store-unavailable" }
+    | { tag: "unknown"; val: string };
+
   export interface IdentityResolveRequest {
     platform: string;
     platformUserId: string;
   }
 
   export interface IdentityResolveResponse {
-    found: boolean;
-    userId: string | undefined;
+    userId: string;
     displayName: string | undefined;
-    error: string | undefined;
   }
 
   export interface IdentityLinkRequest {
@@ -291,33 +666,24 @@ declare module "astrid:capsule/identity@0.1.0" {
     displayName: string | undefined;
   }
 
-  export interface IdentityListLinksRequest {
-    astridUserId: string;
+  export interface IdentityCreateUserResponse {
+    userId: string;
   }
 
-  export interface IdentityOkResponse {
-    ok: boolean;
-    error: string | undefined;
-    userId: string | undefined;
-    removed: boolean | undefined;
-    linksJson: string | undefined;
+  export interface PlatformLink {
+    platform: string;
+    platformUserId: string;
+    linkedAt: string;
+    method: string;
   }
 
-  export function identityResolve(request: IdentityResolveRequest): IdentityResolveResponse;
-  export function identityLink(request: IdentityLinkRequest): IdentityOkResponse;
-  export function identityUnlink(request: IdentityUnlinkRequest): IdentityOkResponse;
-  export function identityCreateUser(request: IdentityCreateUserRequest): IdentityOkResponse;
-  export function identityListLinks(request: IdentityListLinksRequest): IdentityOkResponse;
-}
-
-// ----------------------------------------------------------------------
-// astrid:capsule/uplink
-// ----------------------------------------------------------------------
-declare module "astrid:capsule/uplink@0.1.0" {
-  export function uplinkRegister(name: string, platform: string, profile: string): string;
-  export function uplinkSend(
-    uplinkId: string,
-    platformUserId: string,
-    content: string,
-  ): boolean;
+  export function identityResolve(
+    request: IdentityResolveRequest,
+  ): IdentityResolveResponse;
+  export function identityLink(request: IdentityLinkRequest): void;
+  export function identityUnlink(request: IdentityUnlinkRequest): void;
+  export function identityCreateUser(
+    request: IdentityCreateUserRequest,
+  ): IdentityCreateUserResponse;
+  export function identityListLinks(astridUserId: string): PlatformLink[];
 }

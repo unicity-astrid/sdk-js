@@ -1,11 +1,17 @@
 /**
  * OS runtime introspection + signaling. Mirrors `astrid_sdk::runtime`.
+ *
+ * Also surfaces {@link randomBytes} (cryptographically secure host entropy
+ * via `sys::random-bytes`) for capsules that need an audit-traced CSPRNG —
+ * `globalThis.crypto.getRandomValues` works inside StarlingMonkey but
+ * bypasses the host audit trail.
  */
 
 import {
   getCaller as hostGetCaller,
   signalReady as hostSignalReady,
-} from "astrid:capsule/sys@0.1.0";
+  randomBytes as hostRandomBytes,
+} from "astrid:sys/host@1.0.0";
 import { SysError, callHost } from "./errors.js";
 import { get as getEnv, CONFIG_SOCKET_PATH } from "./env.js";
 
@@ -36,6 +42,16 @@ export function caller(): CallerContext {
     principal: ctx.principal,
     timestamp: ctx.timestamp,
   };
+}
+
+/**
+ * Fill `length` bytes with cryptographically secure random data from the
+ * host's OS-level CSPRNG. Capped at 4096 bytes per call.
+ */
+export function randomBytes(length: number): Uint8Array {
+  return callHost(`runtime.randomBytes(${length})`, () =>
+    hostRandomBytes(BigInt(length)),
+  );
 }
 
 /**

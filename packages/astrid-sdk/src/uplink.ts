@@ -6,8 +6,14 @@
  * messages to the kernel's processing pipeline.
  */
 
-import { uplinkRegister, uplinkSend } from "astrid:capsule/uplink@0.1.0";
+import {
+  uplinkRegister,
+  uplinkSend,
+  type UplinkProfile,
+} from "astrid:uplink/host@1.0.0";
 import { callHost } from "./errors.js";
+
+export type { UplinkProfile } from "astrid:uplink/host@1.0.0";
 
 export class UplinkId {
   readonly value: string;
@@ -20,10 +26,11 @@ export class UplinkId {
 }
 
 /**
- * Register an uplink. `profile` is one of "chat" / "interactive" /
- * "notify" / "bridge". Returns the assigned uplink UUID.
+ * Register an uplink. `profile` is one of `"chat"` / `"interactive"` /
+ * `"notify"` / `"bridge"`. Returns the assigned uplink UUID wrapped in
+ * {@link UplinkId}.
  */
-export function register(name: string, platform: string, profile: string): UplinkId {
+export function register(name: string, platform: string, profile: UplinkProfile): UplinkId {
   const id = callHost(`uplink.register(${JSON.stringify(name)})`, () =>
     uplinkRegister(name, platform, profile),
   );
@@ -31,9 +38,9 @@ export function register(name: string, platform: string, profile: string): Uplin
 }
 
 /**
- * Forward an inbound message through a registered uplink. Returns `true`
- * if sent, `false` if intentionally dropped (e.g. no active session for
- * the principal).
+ * Forward an inbound message through a registered uplink. Returns `true` if
+ * sent, `false` if intentionally dropped (e.g. no active session for the
+ * principal).
  */
 export function send(uplink: UplinkId, platformUserId: string, content: string): boolean {
   return callHost(`uplink.send(${uplink.value})`, () =>

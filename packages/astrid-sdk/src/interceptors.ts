@@ -1,45 +1,25 @@
 /**
- * Auto-subscribed interceptor bindings for run-loop capsules. Mirrors
- * `astrid_sdk::interceptors`.
+ * Interceptor binding registry — metadata for the kernel-managed
+ * interceptor subscriptions a capsule declared in `Capsule.toml`.
  *
- * When a capsule declares both `@run` AND `@interceptor`, the kernel
- * pre-registers IPC subscriptions for each interceptor topic and the
- * `@run` loop reads from those bindings via the IPC bus. The
- * `@interceptor` decorator handles dispatch automatically; this module
- * is for advanced authors who want to drive the loop manually.
+ * Mirrors `astrid_sdk::interceptors`. Under the per-domain ABI, interceptor
+ * events are delivered to the capsule via `astrid-hook-trigger` rather than
+ * a run-loop IPC subscription. The host fn `get-interceptor-bindings` returns
+ * metadata-only — capsules use it to enumerate the `(action, topic)` pairs
+ * they're subscribed to for debugging, introspection, and tooling. `handle`
+ * is the kernel-side registry handle (for log correlation only); it is NOT
+ * convertible into an `ipc.Subscription`.
  */
 
-import { runtimeInterceptors, type InterceptorBinding, type PollResult } from "./ipc.js";
-import * as ipc from "./ipc.js";
+import { runtimeInterceptors, type InterceptorBinding } from "./ipc.js";
 
 export type { InterceptorBinding } from "./ipc.js";
 
-/** Query the runtime for auto-subscribed interceptor handles. */
+/**
+ * Query the runtime for auto-subscribed interceptor handles. Returns an
+ * empty array if this capsule has no auto-subscribed interceptors (i.e. it
+ * does not have both `@run` and `[[interceptor]]`).
+ */
 export function bindings(): InterceptorBinding[] {
   return runtimeInterceptors();
-}
-
-/**
- * Poll all interceptor subscriptions and dispatch pending events.
- * Bindings with no pending messages are skipped. Mirrors
- * `astrid_sdk::interceptors::poll`.
- */
-export function poll(
-  bindings: InterceptorBinding[],
-  handler: (action: string, batch: PollResult) => void,
-): void {
-  for (const b of bindings) {
-    const sub = ipc.subscribe(b.topic); // re-use the existing handle implicitly via the host
-    try {
-      const result = sub.poll();
-      if (result.messages.length > 0) {
-        handler(b.action, result);
-      }
-    } finally {
-      // Don't close the subscription — these are runtime-owned handles
-      // the kernel manages. Subscription.close() ignores the underlying
-      // error for those cases.
-      sub.close();
-    }
-  }
 }

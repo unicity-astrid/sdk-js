@@ -1,42 +1,37 @@
 /**
- * Unix domain socket networking. Mirrors `astrid_sdk::net` which itself
- * borrows shape from `std::sync::mpsc` (RecvError, TryRecvError::{Empty,
- * Closed}, SendError + recv/try_recv/send).
+ * Networking — Unix domain sockets, outbound TCP, inbound TCP listeners,
+ * UDP, and DNS. Mirrors `astrid_sdk::net`. The kernel pre-binds a single
+ * Unix-domain listener per capsule; outbound TCP and UDP are gated by
+ * `net_connect` / `net_udp` allowlists and run through the SSRF airlock.
  *
- * The kernel pre-binds a single Unix socket per capsule; call `bindUnix()`
- * to activate it and start accepting connections.
+ * Resource handles ({@link UnixListener}, {@link TcpListener}, {@link TcpStream},
+ * {@link UdpSocket}) are Component Model resources with automatic Drop. Use
+ * `using` for scope-bound cleanup or call `.close()` explicitly.
+ *
+ * Per-capsule caps: 8 concurrent TCP streams, 4 UDP sockets, 4 TCP listeners.
  */
 
 import {
-  netBindUnix as hostBindUnix,
-  netAccept as hostAccept,
-  netPollAccept as hostPollAccept,
-  netRead as hostRead,
-  netWrite as hostWrite,
-  netCloseStream as hostCloseStream,
-  netConnectTcp as hostConnectTcp,
-  netReadBytes as hostReadBytes,
-  netWriteBytes as hostWriteBytes,
-  netPeek as hostPeek,
-  netShutdown as hostShutdown,
-  netPeerAddr as hostPeerAddr,
-  netLocalAddr as hostLocalAddr,
-  netSetNodelay as hostSetNodelay,
-  netNodelay as hostNodelay,
-  netSetReadTimeout as hostSetReadTimeout,
-  netReadTimeout as hostReadTimeout,
-  netSetWriteTimeout as hostSetWriteTimeout,
-  netWriteTimeout as hostWriteTimeout,
-  netSetTtl as hostSetTtl,
-  netTtl as hostTtl,
+  bindUnix as hostBindUnix,
+  bindTcp as hostBindTcp,
+  connectTcp as hostConnectTcp,
+  udpBind as hostUdpBind,
+  lookupHost as hostLookupHost,
   type NetReadStatus,
   type ShutdownHow,
-} from "astrid:capsule/net@0.1.0";
-import { clockMs as hostClockMs } from "astrid:capsule/sys@0.1.0";
+  type UdpDatagram,
+  type UnixListener as WitUnixListener,
+  type TcpListener as WitTcpListener,
+  type TcpStream as WitTcpStream,
+  type UdpSocket as WitUdpSocket,
+} from "astrid:net/host@1.0.0";
+import { clockMs as hostClockMs } from "astrid:sys/host@1.0.0";
 import { SysError, callHost } from "./errors.js";
 
+export type { ShutdownHow, NetReadStatus, UdpDatagram } from "astrid:net/host@1.0.0";
+
 // ---------------------------------------------------------------------------
-// mpsc-shaped errors
+// mpsc-shaped errors (preserved from pre-migration API)
 // ---------------------------------------------------------------------------
 
 export class RecvError extends Error {
@@ -63,12 +58,6 @@ export class SendError extends Error {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Validate + convert a timeout to the host's `bigint | undefined`.
- * Mirrors Rust SDK's `to_host_timeout`. Rejects `0` (would be
- * ambiguous with "no timeout") matching
- * `std::net::TcpStream::set_read_timeout`'s `Duration::ZERO` rule.
- */
 function toHostTimeout(timeoutMs: number | undefined): bigint | undefined {
   if (timeoutMs === undefined) return undefined;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -80,213 +69,312 @@ function toHostTimeout(timeoutMs: number | undefined): bigint | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Handles
+// Listener handles
 // ---------------------------------------------------------------------------
 
-export class ListenerHandle {
-  readonly id: bigint;
-  constructor(id: bigint) {
-    this.id = id;
+/** The capsule's pre-bound Unix domain listener. Activated by {@link bindUnix}. */
+export class UnixListener {
+  #inner: WitUnixListener | undefined;
+
+  constructor(inner: WitUnixListener) {
+    this.#inner = inner;
+  }
+
+  /** Blocking accept. Performs peer-credential verification + session token handshake. */
+  accept(): TcpStream {
+    const inner = callHost("net.UnixListener.accept", () =>
+      this.#requireInner().accept(),
+    );
+    return new TcpStream(inner);
+  }
+
+  /** Polling accept with caller-controlled timeout. Returns `undefined` if none arrived. */
+  pollAccept(timeoutMs: number): TcpStream | undefined {
+    const ms = toHostTimeout(timeoutMs) ?? 0n;
+    const inner = callHost(`net.UnixListener.pollAccept(${timeoutMs}ms)`, () =>
+      this.#requireInner().pollAccept(ms),
+    );
+    return inner === undefined ? undefined : new TcpStream(inner);
+  }
+
+  close(): void {
+    if (this.#inner === undefined) return;
+    const inner = this.#inner;
+    this.#inner = undefined;
+    try {
+      inner[Symbol.dispose]();
+    } catch {
+      // already released
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  #requireInner(): WitUnixListener {
+    if (this.#inner === undefined) throw SysError.api("UnixListener is closed");
+    return this.#inner;
   }
 }
 
-export class StreamHandle {
-  readonly id: bigint;
-  #closed = false;
+/** A bound TCP listener accepting inbound network connections. Per-capsule cap: 4. */
+export class TcpListener {
+  #inner: WitTcpListener | undefined;
 
-  constructor(id: bigint) {
-    this.id = id;
+  constructor(inner: WitTcpListener) {
+    this.#inner = inner;
   }
 
-  /** Non-blocking read. Returns bytes / `null` (empty) / throws on closed. */
+  /** Blocking accept. */
+  accept(): TcpStream {
+    const inner = callHost("net.TcpListener.accept", () => this.#requireInner().accept());
+    return new TcpStream(inner);
+  }
+
+  /** Polling accept with caller-controlled timeout. */
+  pollAccept(timeoutMs: number): TcpStream | undefined {
+    const ms = toHostTimeout(timeoutMs) ?? 0n;
+    const inner = callHost(`net.TcpListener.pollAccept(${timeoutMs}ms)`, () =>
+      this.#requireInner().pollAccept(ms),
+    );
+    return inner === undefined ? undefined : new TcpStream(inner);
+  }
+
+  localAddr(): string {
+    return callHost("net.TcpListener.localAddr", () => this.#requireInner().localAddr());
+  }
+
+  close(): void {
+    if (this.#inner === undefined) return;
+    const inner = this.#inner;
+    this.#inner = undefined;
+    try {
+      inner[Symbol.dispose]();
+    } catch {
+      // already released
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  #requireInner(): WitTcpListener {
+    if (this.#inner === undefined) throw SysError.api("TcpListener is closed");
+    return this.#inner;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TCP stream — bidirectional resource used for both Unix-domain and TCP
+// ---------------------------------------------------------------------------
+
+export class TcpStream {
+  #inner: WitTcpStream | undefined;
+
+  constructor(inner: WitTcpStream) {
+    this.#inner = inner;
+  }
+
+  // ---- Length-prefixed framed I/O (uplink-proxy use case) -----------------
+
+  /** Non-blocking framed read. Returns Data/Closed/Pending. Max frame: 10 MB. */
   tryRecv(): Uint8Array | { kind: "empty" } {
-    this.#requireOpen();
-    const status: NetReadStatus = callHost(`net.tryRecv(${this.id})`, () => hostRead(this.id));
+    const status: NetReadStatus = callHost("net.TcpStream.tryRecv", () =>
+      this.#requireInner().read(),
+    );
     switch (status.tag) {
       case "data":
-        return status.value;
+        return status.val;
       case "pending":
         return { kind: "empty" };
       case "closed":
-        this.#closed = true;
+        this.close();
         throw new RecvError();
     }
   }
 
   /**
-   * Blocking receive — polls until a frame arrives or the peer closes.
-   * 50 ms sleep between polls matches the Rust SDK; bridge syncify
-   * handles it.
+   * Blocking framed receive. Spins on `tryRecv` with a 50 ms sleep between
+   * polls; StarlingMonkey's syncify makes this a real blocking call from the
+   * host's POV. Mirrors the Rust SDK polling-loop shape.
    */
   recv(): Uint8Array {
-    this.#requireOpen();
-    // Pure polling loop. The WIT net-read is non-blocking; the Rust SDK
-    // sleeps 50 ms between polls. We do the same; StarlingMonkey's
-    // syncify makes this a real blocking call from the host's POV.
     while (true) {
-      try {
-        const result = this.tryRecv();
-        if (result instanceof Uint8Array) return result;
-      } catch (err) {
-        if (err instanceof RecvError) throw err;
-        throw err;
-      }
+      const result = this.tryRecv();
+      if (result instanceof Uint8Array) return result;
       sleepMs(50);
     }
   }
 
+  /** Write a length-prefixed frame. */
   send(data: Uint8Array): void {
-    this.#requireOpen();
     try {
-      hostWrite(this.id, data);
-    } catch {
-      // The host returns an error on dead peers. Cleanup happens on next
-      // read; here we surface SendError to match the Rust SDK.
-      throw new SendError();
+      callHost("net.TcpStream.send", () => this.#requireInner().write(data));
+    } catch (err) {
+      // Map host errors on send to SendError to mirror Rust SDK.
+      if (err instanceof SysError) throw new SendError();
+      throw err;
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Byte-stream surface (mirrors std::net::TcpStream / std::io::Read+Write)
-  // -------------------------------------------------------------------------
+  // ---- Byte-stream I/O ----------------------------------------------------
 
   /**
-   * Read up to `maxBytes` without length-prefix framing. Mirrors
-   * `std::net::TcpStream::read`.
-   *
-   * Contract:
-   * - **Empty Uint8Array = EOF** (peer disconnected). Unambiguous.
-   * - Non-empty = data read (may be shorter than `maxBytes`).
-   * - Throws `SysError` with message containing `"would block"` if a
-   *   read timeout was set via {@link setReadTimeout} and expired
-   *   with no data. With no timeout set, blocks until data, EOF, or
-   *   capsule unload.
+   * Read up to `maxBytes` without length-prefix framing. Empty array = EOF.
+   * Honours any timeout set via {@link setReadTimeout}.
    */
   readBytes(maxBytes: number): Uint8Array {
-    this.#requireOpen();
-    return callHost(`net.readBytes(${this.id}, ${maxBytes})`, () =>
-      hostReadBytes(this.id, maxBytes),
+    return callHost(`net.TcpStream.readBytes(${maxBytes})`, () =>
+      this.#requireInner().readBytes(maxBytes),
     );
   }
 
-  /**
-   * Write `data` without framing. Returns bytes written (may be less than
-   * `data.length` when the kernel's socket buffer is full). Honours any
-   * timeout set via {@link setWriteTimeout}; with no timeout set, blocks
-   * until the write completes or the peer disconnects.
-   */
+  /** Write `data` without framing. Returns bytes written (may be less than `data.length`). */
   writeBytes(data: Uint8Array): number {
-    this.#requireOpen();
-    return callHost(`net.writeBytes(${this.id})`, () => hostWriteBytes(this.id, data));
+    return callHost("net.TcpStream.writeBytes", () =>
+      this.#requireInner().writeBytes(data),
+    );
   }
 
-  /**
-   * Peek up to `maxBytes` without consuming them — the next
-   * {@link readBytes} returns the same data again. Same EOF /
-   * would-block semantics as {@link readBytes}.
-   */
+  /** Peek up to `maxBytes` without consuming them. */
   peek(maxBytes: number): Uint8Array {
-    this.#requireOpen();
-    return callHost(`net.peek(${this.id}, ${maxBytes})`, () => hostPeek(this.id, maxBytes));
+    return callHost(`net.TcpStream.peek(${maxBytes})`, () =>
+      this.#requireInner().peek(maxBytes),
+    );
   }
 
   /** Half-close the read side, write side, or both. */
   shutdown(how: ShutdownHow): void {
-    this.#requireOpen();
-    callHost(`net.shutdown(${this.id}, ${how})`, () => hostShutdown(this.id, how));
+    callHost(`net.TcpStream.shutdown(${how})`, () => this.#requireInner().shutdown(how));
   }
 
-  /** Remote peer address as `"ip:port"`. */
+  // ---- Address accessors --------------------------------------------------
+
+  /** Remote peer address as `"ip:port"`. Returns `not-tcp` for Unix-domain streams. */
   peerAddr(): string {
-    this.#requireOpen();
-    return callHost(`net.peerAddr(${this.id})`, () => hostPeerAddr(this.id));
+    return callHost("net.TcpStream.peerAddr", () => this.#requireInner().peerAddr());
   }
 
   /** Local socket address as `"ip:port"`. */
   localAddr(): string {
-    this.#requireOpen();
-    return callHost(`net.localAddr(${this.id})`, () => hostLocalAddr(this.id));
+    return callHost("net.TcpStream.localAddr", () => this.#requireInner().localAddr());
   }
 
-  /** Toggle `TCP_NODELAY` (Nagle's algorithm off when `true`). */
+  // ---- TCP socket options -------------------------------------------------
+
   setNodelay(nodelay: boolean): void {
-    this.#requireOpen();
-    callHost(`net.setNodelay(${this.id}, ${nodelay})`, () => hostSetNodelay(this.id, nodelay));
+    callHost(`net.TcpStream.setNodelay(${nodelay})`, () =>
+      this.#requireInner().setNodelay(nodelay),
+    );
   }
 
-  /** Current `TCP_NODELAY` setting. */
   nodelay(): boolean {
-    this.#requireOpen();
-    return callHost(`net.nodelay(${this.id})`, () => hostNodelay(this.id));
+    return callHost("net.TcpStream.nodelay", () => this.#requireInner().nodelay());
   }
 
-  /**
-   * Set the read timeout (milliseconds). `undefined` clears the
-   * timeout (reads block indefinitely). `0` is rejected — matches
-   * `std::net::TcpStream::set_read_timeout` which errors on
-   * `Duration::ZERO`.
-   */
   setReadTimeout(timeoutMs: number | undefined): void {
-    this.#requireOpen();
     const ms = toHostTimeout(timeoutMs);
-    callHost(`net.setReadTimeout(${this.id}, ${timeoutMs})`, () =>
-      hostSetReadTimeout(this.id, ms),
+    callHost(`net.TcpStream.setReadTimeout(${timeoutMs})`, () =>
+      this.#requireInner().setReadTimeout(ms),
     );
   }
 
-  /** Current read timeout in milliseconds, or `undefined` if unset. */
   readTimeout(): number | undefined {
-    this.#requireOpen();
-    const v = callHost(`net.readTimeout(${this.id})`, () => hostReadTimeout(this.id));
+    const v = callHost("net.TcpStream.readTimeout", () => this.#requireInner().readTimeout());
     return v === undefined ? undefined : Number(v);
   }
 
-  /**
-   * Set the write timeout (milliseconds). `undefined` clears it;
-   * `0` is rejected (matches
-   * `std::net::TcpStream::set_write_timeout`).
-   */
   setWriteTimeout(timeoutMs: number | undefined): void {
-    this.#requireOpen();
     const ms = toHostTimeout(timeoutMs);
-    callHost(`net.setWriteTimeout(${this.id}, ${timeoutMs})`, () =>
-      hostSetWriteTimeout(this.id, ms),
+    callHost(`net.TcpStream.setWriteTimeout(${timeoutMs})`, () =>
+      this.#requireInner().setWriteTimeout(ms),
     );
   }
 
-  /** Current write timeout in milliseconds, or `undefined` if unset. */
   writeTimeout(): number | undefined {
-    this.#requireOpen();
-    const v = callHost(`net.writeTimeout(${this.id})`, () => hostWriteTimeout(this.id));
+    const v = callHost("net.TcpStream.writeTimeout", () => this.#requireInner().writeTimeout());
     return v === undefined ? undefined : Number(v);
   }
 
-  /** Set the IP `TTL` on outgoing packets. */
-  setTtl(ttl: number): void {
-    this.#requireOpen();
-    callHost(`net.setTtl(${this.id}, ${ttl})`, () => hostSetTtl(this.id, ttl));
+  /** IPv6 hop limit / IPv4 TTL. */
+  setHopLimit(hops: number): void {
+    callHost(`net.TcpStream.setHopLimit(${hops})`, () =>
+      this.#requireInner().setHopLimit(hops),
+    );
   }
 
-  /** Current IP `TTL`. */
-  ttl(): number {
-    this.#requireOpen();
-    return callHost(`net.ttl(${this.id})`, () => hostTtl(this.id));
+  hopLimit(): number {
+    return callHost("net.TcpStream.hopLimit", () => this.#requireInner().hopLimit());
   }
+
+  /** Backwards-compat alias for {@link setHopLimit} matching the pre-migration name. */
+  setTtl(ttl: number): void {
+    this.setHopLimit(ttl);
+  }
+
+  ttl(): number {
+    return this.hopLimit();
+  }
+
+  /** TCP keepalive probe interval in seconds (`undefined` disables). */
+  setKeepalive(keepaliveSecs: number | undefined): void {
+    const v = keepaliveSecs === undefined ? undefined : BigInt(Math.max(0, Math.floor(keepaliveSecs)));
+    callHost(`net.TcpStream.setKeepalive(${keepaliveSecs})`, () =>
+      this.#requireInner().setKeepalive(v),
+    );
+  }
+
+  keepalive(): number | undefined {
+    const v = callHost("net.TcpStream.keepalive", () => this.#requireInner().keepalive());
+    return v === undefined ? undefined : Number(v);
+  }
+
+  /** SO_LINGER. `undefined` = default; `0` = immediate RST; otherwise drain time in ms. */
+  setLinger(lingerMs: number | undefined): void {
+    const v = lingerMs === undefined ? undefined : BigInt(Math.max(0, Math.floor(lingerMs)));
+    callHost(`net.TcpStream.setLinger(${lingerMs})`, () =>
+      this.#requireInner().setLinger(v),
+    );
+  }
+
+  linger(): number | undefined {
+    const v = callHost("net.TcpStream.linger", () => this.#requireInner().linger());
+    return v === undefined ? undefined : Number(v);
+  }
+
+  setReuseaddr(reuse: boolean): void {
+    callHost(`net.TcpStream.setReuseaddr(${reuse})`, () =>
+      this.#requireInner().setReuseaddr(reuse),
+    );
+  }
+
+  reuseaddr(): boolean {
+    return callHost("net.TcpStream.reuseaddr", () => this.#requireInner().reuseaddr());
+  }
+
+  // ---- Lifecycle ----------------------------------------------------------
 
   close(): void {
-    if (this.#closed) return;
-    this.#closed = true;
+    if (this.#inner === undefined) return;
+    const inner = this.#inner;
+    this.#inner = undefined;
     try {
-      hostCloseStream(this.id);
+      inner[Symbol.dispose]();
     } catch {
-      /* idempotent */
+      // already released
     }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 
   /** Async iterator yielding each frame until the peer closes. */
   async *[Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
     try {
-      while (true) {
+      while (this.#inner !== undefined) {
         try {
           yield this.recv();
         } catch (err) {
@@ -299,87 +387,169 @@ export class StreamHandle {
     }
   }
 
-  #requireOpen(): void {
-    if (this.#closed) throw SysError.api(`net stream ${this.id} is closed`);
+  #requireInner(): WitTcpStream {
+    if (this.#inner === undefined) throw SysError.api("TcpStream is closed");
+    return this.#inner;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Listener API
-// ---------------------------------------------------------------------------
-
-/** Bind the kernel-pre-provisioned Unix socket and return a listener handle. */
-export function bindUnix(): ListenerHandle {
-  const handle = callHost("net.bindUnix", () => hostBindUnix(0n));
-  return new ListenerHandle(handle);
-}
-
-/** Block until the next incoming connection. */
-export function accept(listener: ListenerHandle): StreamHandle {
-  const id = callHost(`net.accept(${listener.id})`, () => hostAccept(listener.id));
-  return new StreamHandle(id);
-}
-
-/** Non-blocking accept. Returns the stream or `undefined` if none ready. */
-export function tryAccept(listener: ListenerHandle): StreamHandle | undefined {
-  const id = callHost(`net.tryAccept(${listener.id})`, () => hostPollAccept(listener.id));
-  return id === undefined ? undefined : new StreamHandle(id);
-}
-
-// ---------------------------------------------------------------------------
-// Outbound TCP — STUB pending host fn
+// UDP socket
 // ---------------------------------------------------------------------------
 
 /**
- * Open an outbound TCP connection to `host:port`.
- *
- * The returned {@link StreamHandle} flows through the same `recv` /
- * `tryRecv` / `send` / `close` API as the `accept` path — Astrid's host
- * ABI keeps inbound and outbound on one stream-handle type.
- *
- * The kernel runs three checks before the TCP syscall:
- *
- * 1. The capsule's `net_connect` allowlist in `Capsule.toml` must
- *    contain a pattern matching `"host:port"` (exact) or `"host:*"`
- *    (any port for the named host). Missing or empty list denies all
- *    outbound TCP (fail-closed).
- * 2. DNS resolution rejects loopback, private, link-local, multicast,
- *    and unspecified IPs (same airlock as `http.request`).
- * 3. Per-capsule active-stream cap (default 8, shared with inbound
- *    `accept`).
- *
- * Connect attempts are bounded to ~10s by the host. A stalled DNS or
- * TCP handshake surfaces as a `SysError`, not an indefinite hang.
- *
- * @param host Hostname or IP, matched against the manifest allowlist.
- * @param port TCP port (1–65535).
- *
- * Tracking issue: https://github.com/unicity-astrid/astrid/issues/745
- * RFC: https://github.com/unicity-astrid/rfcs/pull/27
+ * UDP datagram socket. Two modes: unconnected (`sendTo`/`recvFrom`) and
+ * connected (`connect` + `send`/`recv`). Per-capsule cap: 4.
  */
-export function connect(host: string, port: number): StreamHandle {
-  const id = callHost(`net.connect(${JSON.stringify(host)}, ${port})`, () =>
-    hostConnectTcp(host, port),
-  );
-  return new StreamHandle(id);
+export class UdpSocket {
+  #inner: WitUdpSocket | undefined;
+
+  constructor(inner: WitUdpSocket) {
+    this.#inner = inner;
+  }
+
+  sendTo(data: Uint8Array, peerHost: string, peerPort: number): number {
+    return callHost(`net.UdpSocket.sendTo(${peerHost}:${peerPort})`, () =>
+      this.#requireInner().sendTo(data, peerHost, peerPort),
+    );
+  }
+
+  recvFrom(maxBytes: number): UdpDatagram | undefined {
+    return callHost(`net.UdpSocket.recvFrom(${maxBytes})`, () =>
+      this.#requireInner().recvFrom(maxBytes),
+    );
+  }
+
+  connect(peerHost: string, peerPort: number): void {
+    callHost(`net.UdpSocket.connect(${peerHost}:${peerPort})`, () =>
+      this.#requireInner().connect(peerHost, peerPort),
+    );
+  }
+
+  disconnect(): void {
+    callHost("net.UdpSocket.disconnect", () => this.#requireInner().disconnect());
+  }
+
+  send(data: Uint8Array): number {
+    return callHost("net.UdpSocket.send", () => this.#requireInner().send(data));
+  }
+
+  recv(maxBytes: number): Uint8Array | undefined {
+    return callHost(`net.UdpSocket.recv(${maxBytes})`, () =>
+      this.#requireInner().recv(maxBytes),
+    );
+  }
+
+  peerAddr(): string | undefined {
+    return callHost("net.UdpSocket.peerAddr", () => this.#requireInner().peerAddr());
+  }
+
+  setReadTimeout(timeoutMs: number | undefined): void {
+    const ms = toHostTimeout(timeoutMs);
+    callHost(`net.UdpSocket.setReadTimeout(${timeoutMs})`, () =>
+      this.#requireInner().setReadTimeout(ms),
+    );
+  }
+
+  localAddr(): string {
+    return callHost("net.UdpSocket.localAddr", () => this.#requireInner().localAddr());
+  }
+
+  close(): void {
+    if (this.#inner === undefined) return;
+    const inner = this.#inner;
+    this.#inner = undefined;
+    try {
+      inner[Symbol.dispose]();
+    } catch {
+      // already released
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  #requireInner(): WitUdpSocket {
+    if (this.#inner === undefined) throw SysError.api("UdpSocket is closed");
+    return this.#inner;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Sleep shim
+// Pre-migration handle types preserved for source-compatibility — these are
+// now just type aliases over the resource-backed classes above. Callers using
+// the legacy names (`StreamHandle`, `ListenerHandle`) continue to compile.
+// ---------------------------------------------------------------------------
+
+export { TcpStream as StreamHandle, UnixListener as ListenerHandle };
+
+// ---------------------------------------------------------------------------
+// Factory functions
+// ---------------------------------------------------------------------------
+
+/** Bind the kernel-pre-provisioned Unix socket and return a listener. */
+export function bindUnix(): UnixListener {
+  const inner = callHost("net.bindUnix", () => hostBindUnix());
+  return new UnixListener(inner);
+}
+
+/**
+ * Bind a TCP listener for inbound connections. Gated by `net_tcp_bind`. Port
+ * 0 selects an ephemeral port.
+ */
+export function bindTcp(host: string, port: number): TcpListener {
+  const inner = callHost(`net.bindTcp(${host}:${port})`, () => hostBindTcp(host, port));
+  return new TcpListener(inner);
+}
+
+/** Block until the next incoming connection on the Unix listener. */
+export function accept(listener: UnixListener): TcpStream {
+  return listener.accept();
+}
+
+/** Non-blocking accept. Returns `undefined` if none ready. */
+export function tryAccept(listener: UnixListener): TcpStream | undefined {
+  return listener.pollAccept(0);
+}
+
+/**
+ * Open an outbound TCP connection to `host:port`. Goes through the SSRF
+ * airlock (rejects private/loopback/etc.) and the `net_connect` allowlist.
+ */
+export function connect(host: string, port: number): TcpStream {
+  const inner = callHost(`net.connect(${host}:${port})`, () => hostConnectTcp(host, port));
+  return new TcpStream(inner);
+}
+
+/** Alias for {@link connect} matching the WIT name. */
+export const connectTcp = connect;
+
+/** Bind a UDP socket. */
+export function udpBind(host: string, port: number): UdpSocket {
+  const inner = callHost(`net.udpBind(${host}:${port})`, () => hostUdpBind(host, port));
+  return new UdpSocket(inner);
+}
+
+/**
+ * Resolve a hostname to a list of `"ip:port"` (or `"ip"` if no port in input)
+ * strings. SSRF airlock applies — private/loopback/etc. ranges stripped.
+ */
+export function lookupHost(host: string): string[] {
+  return callHost(`net.lookupHost(${host})`, () => hostLookupHost(host));
+}
+
+// ---------------------------------------------------------------------------
+// Sleep shim — used by the polling recv loop
 // ---------------------------------------------------------------------------
 
 /**
- * 50 ms sleep used by the polling receive loop. Implemented as a busy-wait
- * against the host clock — StarlingMonkey's syncify wraps this into a
- * single blocking host call from the kernel's perspective. Not exposed
- * publicly because authors who need a real sleep should use IPC's
- * blocking `recv(timeoutMs)`.
+ * 50 ms busy-wait against the host clock. StarlingMonkey's syncify wraps the
+ * surrounding polling-loop into a single blocking host call from the kernel's
+ * POV. Not exposed publicly; authors who need a real sleep should use IPC's
+ * `recv(timeoutMs)` or `sys::sleepNs`.
  */
 function sleepMs(ms: number): void {
-  // Bounded busy-wait against the host clock. We deliberately avoid
-  // setTimeout — the engine's microtask drain would refuse to settle the
-  // surrounding promise. StarlingMonkey's syncify wraps the loop into a
-  // single blocking host call from the kernel's POV.
   const deadline = hostClockMs() + BigInt(ms);
   while (hostClockMs() < deadline) {
     // spin
