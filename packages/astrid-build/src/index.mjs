@@ -168,6 +168,113 @@ export function astridUpgrade() {
  * resolve bare-specifier imports (`@astrid-os/sdk`); esbuild inlines
  * everything except the WIT-resolved `astrid:*` imports.
  */
+/**
+ * esbuild plugin that resolves Node builtins (`fs`, `path`, `crypto`,
+ * `zlib`, …) and a small allowlist of Node-flavoured packages (`ws`)
+ * to a synthetic module that returns throw-on-call Proxies for every
+ * access. The capsule runtime (StarlingMonkey) doesn't provide
+ * `node:*` builtins; libraries written for both Node and the browser
+ * commonly carry a `node:crypto` import for paths that never run on
+ * non-Node platforms. Without this plugin, those imports fail the
+ * bundle. With it, the bundle succeeds and any unreached path stays
+ * unreached at runtime — the proxy throws if a capsule actually
+ * touches them.
+ *
+ * Throwing lazily (on first call, not on import) matters: many
+ * sphere-sdk classes bind `crypto.createHmac` at top level via
+ * destructuring, but only call it down a code path that's never
+ * exercised in the capsule's actual usage (admin tooling, etc).
+ */
+function nodeBuiltinStubPlugin() {
+  // Per-module named-export lists. esbuild does static analysis of
+  // named imports against the stub module's actual exports, so the
+  // stub file must explicitly declare every name that could be
+  // destructure-imported by an upstream library. Growing this list
+  // is benign — unused entries cost nothing at bundle or runtime.
+  // Add new entries when a build surfaces "No matching export in
+  // 'astrid-node-stub:<X>' for import 'Y'".
+  const namedExports = {
+    assert: ["ok", "strict", "strictEqual", "deepEqual", "deepStrictEqual", "notEqual", "fail"],
+    buffer: ["Buffer", "Blob", "File", "constants", "kMaxLength", "kStringMaxLength", "atob", "btoa", "isAscii", "isUtf8"],
+    child_process: ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"],
+    constants: [],
+    crypto: ["createHmac", "createHash", "createCipher", "createCipheriv", "createDecipher", "createDecipheriv", "createSign", "createVerify", "createDiffieHellman", "createECDH", "randomBytes", "randomUUID", "randomInt", "randomFillSync", "scrypt", "scryptSync", "pbkdf2", "pbkdf2Sync", "timingSafeEqual", "constants", "webcrypto", "subtle", "X509Certificate", "KeyObject", "generateKeySync", "generateKey", "generateKeyPair", "generateKeyPairSync", "createPublicKey", "createPrivateKey", "createSecretKey", "sign", "verify", "publicEncrypt", "privateDecrypt", "privateEncrypt", "publicDecrypt", "hkdf", "hkdfSync", "getCiphers", "getHashes", "getCurves", "getRandomValues"],
+    dgram: ["createSocket", "Socket"],
+    dns: ["lookup", "resolve", "resolve4", "resolve6", "resolveTxt", "promises"],
+    events: ["EventEmitter", "once", "on", "captureRejectionSymbol", "defaultMaxListeners", "errorMonitor", "setMaxListeners"],
+    fs: ["readFileSync", "writeFileSync", "existsSync", "statSync", "lstatSync", "readdirSync", "mkdirSync", "rmSync", "rmdirSync", "unlinkSync", "renameSync", "promises", "constants", "createReadStream", "createWriteStream", "watch", "watchFile", "openSync", "closeSync", "readSync", "writeSync", "fstatSync", "ftruncateSync", "appendFileSync", "accessSync", "copyFileSync", "linkSync", "symlinkSync", "readlinkSync", "realpathSync", "utimesSync", "chmodSync", "chownSync"],
+    "fs/promises": ["readFile", "writeFile", "stat", "lstat", "readdir", "mkdir", "rm", "rmdir", "unlink", "rename", "open", "access", "copyFile", "appendFile", "link", "symlink", "readlink", "realpath", "utimes", "chmod", "chown"],
+    http: ["createServer", "request", "get", "Agent", "globalAgent", "STATUS_CODES", "METHODS"],
+    https: ["createServer", "request", "get", "Agent", "globalAgent"],
+    module: ["createRequire", "builtinModules", "Module", "isBuiltin"],
+    net: ["createServer", "createConnection", "connect", "Socket", "Server", "isIP", "isIPv4", "isIPv6"],
+    os: ["arch", "platform", "type", "release", "hostname", "homedir", "tmpdir", "cpus", "endianness", "freemem", "totalmem", "uptime", "userInfo", "EOL", "constants"],
+    path: ["join", "resolve", "basename", "dirname", "extname", "sep", "delimiter", "isAbsolute", "normalize", "relative", "parse", "format", "posix", "win32", "toNamespacedPath"],
+    perf_hooks: ["performance", "PerformanceObserver"],
+    process: ["env", "argv", "platform", "arch", "version", "versions", "stdout", "stderr", "stdin", "cwd", "chdir", "exit", "nextTick", "pid", "ppid"],
+    querystring: ["parse", "stringify", "escape", "unescape"],
+    readline: ["createInterface", "Interface"],
+    stream: ["Readable", "Writable", "Transform", "PassThrough", "Duplex", "pipeline", "finished", "promises"],
+    "stream/web": ["ReadableStream", "WritableStream", "TransformStream", "ByteLengthQueuingStrategy", "CountQueuingStrategy"],
+    tls: ["createServer", "connect", "createSecureContext", "TLSSocket", "Server", "checkServerIdentity", "rootCertificates", "DEFAULT_CIPHERS", "DEFAULT_MIN_VERSION", "DEFAULT_MAX_VERSION"],
+    tty: ["isatty", "ReadStream", "WriteStream"],
+    url: ["URL", "URLSearchParams", "fileURLToPath", "pathToFileURL", "format", "parse", "resolve", "domainToASCII", "domainToUnicode"],
+    util: ["promisify", "inspect", "format", "deprecate", "callbackify", "TextDecoder", "TextEncoder", "types", "isDeepStrictEqual"],
+    vm: ["createContext", "runInContext", "runInNewContext", "runInThisContext", "Script"],
+    worker_threads: ["Worker", "isMainThread", "parentPort", "workerData", "threadId"],
+    zlib: ["gzip", "gunzip", "gzipSync", "gunzipSync", "deflate", "inflate", "deflateSync", "inflateSync", "createGzip", "createGunzip", "createDeflate", "createInflate", "constants", "brotliCompress", "brotliDecompress", "brotliCompressSync", "brotliDecompressSync"],
+    ws: ["WebSocket", "WebSocketServer", "Server", "createWebSocketStream"],
+  };
+  return {
+    name: "astrid-node-builtin-stub",
+    setup(build) {
+      build.onResolve({ filter: /^(node:)?[^./].*$/ }, (args) => {
+        const stripped = args.path.startsWith("node:")
+          ? args.path.slice(5)
+          : args.path;
+        if (Object.prototype.hasOwnProperty.call(namedExports, stripped)) {
+          return { path: stripped, namespace: "astrid-node-stub" };
+        }
+        return null;
+      });
+      build.onLoad(
+        { filter: /.*/, namespace: "astrid-node-stub" },
+        (args) => {
+          const names = namedExports[args.path] ?? [];
+          const exportLines = names
+            .map((n) => `export const ${n} = makeStub(${JSON.stringify(n)});`)
+            .join("\n");
+          return {
+            loader: "js",
+            contents: `
+const importPath = ${JSON.stringify(args.path)};
+const throwUnavailable = (member) => {
+  throw new Error(
+    "Capsule reached node-builtin stub: " + importPath +
+    (member ? "." + member : "") +
+    " is not available on wasm32. The capsule must avoid this code path " +
+    "or replace the import with a web-equivalent (e.g. globalThis.crypto " +
+    "for WebCrypto, astrid_sdk net for sockets)."
+  );
+};
+const makeStub = (member) => new Proxy(function () {}, {
+  get(_target, prop) {
+    if (typeof prop === "symbol") return undefined;
+    return makeStub((member ? member + "." : "") + String(prop));
+  },
+  apply() { throwUnavailable(member); },
+  construct() { throwUnavailable(member); },
+});
+${exportLines}
+export default makeStub("");
+`,
+          };
+        },
+      );
+    },
+  };
+}
+
 async function bundle(entryPath, projectDir) {
   const genDir = dirname(entryPath);
   const bundlePath = join(genDir, "_entry.mjs");
@@ -175,7 +282,15 @@ async function bundle(entryPath, projectDir) {
     entryPoints: [entryPath],
     bundle: true,
     format: "esm",
-    platform: "neutral",
+    // Browser platform so esbuild honors the `browser` field in package.json
+    // (node-forge maps `crypto`/`buffer`/`process` to empty modules; libp2p
+    // maps its node:crypto-using files to .browser.js variants that use
+    // WebCrypto). StarlingMonkey provides WebCrypto via globalThis.crypto
+    // but does NOT provide node:crypto/node:events/etc., so the Node
+    // variants of these packages would fail at bundle time. The capsule
+    // runtime surface is web-like, not Node-like, on every axis that
+    // matters for bundling.
+    platform: "browser",
     target: "es2022",
     outfile: bundlePath,
     // Mark WIT module specifiers as external so esbuild doesn't try to
@@ -186,8 +301,13 @@ async function bundle(entryPath, projectDir) {
     // Working dir resolution: esbuild needs to look in the project's
     // node_modules to find @astrid-os/sdk via the workspace symlink.
     absWorkingDir: projectDir,
-    // Conditional exports: prefer ESM for everything.
-    conditions: ["import", "module", "node"],
+    // Conditional exports: prefer ESM, then browser-conditional entries
+    // (Sphere SDK's `./impl/browser` etc.). `node` is intentionally
+    // omitted — the capsule runtime can't satisfy node:* builtins.
+    conditions: ["import", "module", "browser"],
+    // Stub Node builtins + Node-adjacent packages that may leak in from
+    // dual-target dependencies (libp2p, sphere-sdk, etc.). See plugin doc.
+    plugins: [nodeBuiltinStubPlugin()],
     // Don't minify — we want readable error messages during development.
     // Componentize will be the one stripping for size.
     minify: false,
