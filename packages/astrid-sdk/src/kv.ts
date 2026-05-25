@@ -90,8 +90,13 @@ export function clearPrefix(prefix: string): bigint {
 /**
  * Atomic compare-and-swap. If the current value for `key` equals `expected`,
  * write `newValue` and return `true`. Otherwise leave the store unchanged and
- * return `false`. `expected = undefined` means "swap only if the key does not
- * currently exist" (create-if-absent).
+ * return `false` — the routine lost-race retry path. `expected = undefined`
+ * means "swap only if the key does not currently exist" (create-if-absent).
+ *
+ * SDK-level convenience: the underlying WIT host fn surfaces mismatch as
+ * `Err(cas-mismatch)`. We catch that here and return `false` so capsule code
+ * can branch on success/mismatch with a boolean. Genuine host errors (quota,
+ * invalid key, etc.) still throw via `callHost`.
  *
  * Required for any concurrent coordination on shared state — the kernel runs
  * capsule invocations across a multi-threaded worker pool so naive RMW
@@ -102,7 +107,15 @@ export function cas(
   expected: Uint8Array | undefined,
   newValue: Uint8Array,
 ): boolean {
-  return callHost(`kv.cas(${quote(key)})`, () => hostCas(key, expected, newValue));
+  try {
+    callHost(`kv.cas(${quote(key)})`, () => hostCas(key, expected, newValue));
+    return true;
+  } catch (err) {
+    if (err instanceof SysError && err.message.includes("cas-mismatch")) {
+      return false;
+    }
+    throw err;
+  }
 }
 
 function quote(s: string): string {
