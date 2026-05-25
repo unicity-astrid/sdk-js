@@ -31,7 +31,7 @@ import {
 import * as kv from "../kv.js";
 import * as ipc from "../ipc.js";
 import * as log from "../log.js";
-import { getConfig } from "astrid:capsule/sys@0.1.0";
+import { getConfig } from "astrid:sys/host@1.0.0";
 
 const STATE_KEY = "__state";
 
@@ -335,7 +335,7 @@ function stringifyResult(value: unknown): string {
 
 function safeGetConfig(key: string): string {
   try {
-    return getConfig(key);
+    return getConfig(key) ?? "";
   } catch {
     return "";
   }

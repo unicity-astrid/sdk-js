@@ -1,40 +1,81 @@
 /**
  * Outbound HTTP. Two public shapes:
  *
- *   1. A builder-style `http.Request` / `http.Response` mirroring the Rust
+ *   1. A builder-style {@link Request} / {@link Response} mirroring the Rust
  *      SDK's reqwest-like API (`http.get(url)`, `http.send(req)`).
  *   2. A WHATWG `fetch(url, init)` polyfill registered onto `globalThis`
- *      at SDK init via `installFetchPolyfill()`. Routes through the same
+ *      at SDK init via {@link installFetchPolyfill}. Routes through the same
  *      capability-gated host imports so users can't bypass the per-capsule
  *      net allow-list by reaching for the platform fetch.
  *
- * Streaming: `streamStart` returns a handle, `streamRead` pulls chunks
- * until empty, `streamClose` releases the host-side resource.
+ * Streaming: {@link streamStart} returns an {@link HttpStream} resource
+ * handle with `read-chunk` for explicit per-chunk pulls, an `async-iterator`
+ * convenience, and access to the body as an `astrid:io/streams` `InputStream`
+ * for capsules forwarding the body into another sink.
  */
 
 import {
   httpRequest as hostRequest,
   httpStreamStart as hostStreamStart,
-  httpStreamRead as hostStreamRead,
-  httpStreamClose as hostStreamClose,
   type HttpRequestData,
   type HttpResponseData,
-  type HttpStreamStartResponse,
+  type HttpStream as WitHttpStream,
+  type HttpMethod as WitHttpMethod,
   type KeyValuePair,
-} from "astrid:capsule/http@0.1.0";
+} from "astrid:http/host@1.0.0";
 import { SysError, callHost } from "./errors.js";
+
+// ---------------------------------------------------------------------------
+// Method type
+// ---------------------------------------------------------------------------
+
+export type HttpMethod =
+  | "GET"
+  | "HEAD"
+  | "POST"
+  | "PUT"
+  | "DELETE"
+  | "CONNECT"
+  | "OPTIONS"
+  | "TRACE"
+  | "PATCH"
+  | string;
+
+/** Convert a string method name into the WIT variant the host expects. */
+function methodToWit(method: string): WitHttpMethod {
+  switch (method.toUpperCase()) {
+    case "GET":
+      return { tag: "get" };
+    case "HEAD":
+      return { tag: "head" };
+    case "POST":
+      return { tag: "post" };
+    case "PUT":
+      return { tag: "put" };
+    case "DELETE":
+      return { tag: "delete" };
+    case "CONNECT":
+      return { tag: "connect" };
+    case "OPTIONS":
+      return { tag: "options" };
+    case "TRACE":
+      return { tag: "trace" };
+    case "PATCH":
+      return { tag: "patch" };
+    default:
+      return { tag: "other", val: method };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Builder API (reqwest shape)
 // ---------------------------------------------------------------------------
 
-export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS";
-
 export class Request {
   url: string;
   method: string;
   headers: Map<string, string>;
-  body: string | undefined;
+  body: Uint8Array | undefined;
 
   constructor(method: string, url: string) {
     this.method = method;
@@ -55,31 +96,39 @@ export class Request {
   static delete(url: string): Request {
     return new Request("DELETE", url);
   }
+  static patch(url: string): Request {
+    return new Request("PATCH", url);
+  }
+  static head(url: string): Request {
+    return new Request("HEAD", url);
+  }
 
   header(key: string, value: string): this {
     this.headers.set(key, value);
     return this;
   }
 
-  setBody(body: string): this {
-    this.body = body;
+  setBody(body: string | Uint8Array): this {
+    this.body = typeof body === "string" ? new TextEncoder().encode(body) : body;
     return this;
   }
 
   json<T>(value: T): this {
     this.headers.set("Content-Type", "application/json");
+    let s: string;
     try {
-      this.body = JSON.stringify(value);
+      s = JSON.stringify(value);
     } catch (err) {
       throw SysError.json(`http.Request.json: ${(err as Error).message}`, err);
     }
+    this.body = new TextEncoder().encode(s);
     return this;
   }
 
   toWit(): HttpRequestData {
     return {
       url: this.url,
-      method: this.method,
+      method: methodToWit(this.method),
       headers: Array.from(this.headers, ([key, value]) => ({ key, value })),
       body: this.body,
     };
@@ -128,33 +177,53 @@ export function send(req: Request): Response {
 // Streaming
 // ---------------------------------------------------------------------------
 
+/**
+ * Streaming HTTP response. The kernel buffers chunks server-side; the
+ * capsule reads them via `.read()` (or the async iterator) until EOF. Drop
+ * (via `using` or `.close()`) releases the host-side resource.
+ */
 export class HttpStreamHandle {
-  readonly id: bigint;
-  #closed = false;
+  #inner: WitHttpStream | undefined;
+  readonly status: number;
+  readonly headers: Map<string, string>;
 
-  constructor(id: bigint) {
-    this.id = id;
+  constructor(inner: WitHttpStream) {
+    this.#inner = inner;
+    this.status = inner.status();
+    this.headers = new Map(inner.headers().map((h: KeyValuePair) => [h.key, h.value]));
   }
 
+  /** Read the next chunk. Returns `undefined` at EOF. */
   read(): Uint8Array | undefined {
-    if (this.#closed) return undefined;
-    const chunk = callHost(`http.streamRead`, () => hostStreamRead(this.id));
+    if (this.#inner === undefined) return undefined;
+    const chunk = callHost("http.HttpStream.readChunk", () => this.#inner!.readChunk());
     if (chunk.length === 0) return undefined;
     return chunk;
   }
 
   close(): void {
-    if (this.#closed) return;
-    this.#closed = true;
+    if (this.#inner === undefined) return;
+    const inner = this.#inner;
+    this.#inner = undefined;
     try {
-      hostStreamClose(this.id);
+      // Explicit close mirrors the WIT-defined `.close()`; the Drop step still
+      // runs on resource release regardless.
+      inner.close();
     } catch {
-      // idempotent close — host returns an error if the handle is gone;
-      // safe to swallow here.
+      // idempotent close — host may have already released it.
+    }
+    try {
+      inner[Symbol.dispose]();
+    } catch {
+      // already released
     }
   }
 
-  /** Async iterator that yields each chunk until EOF. Closes on completion. */
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  /** Async iterator that yields each chunk until EOF. Auto-closes on completion. */
   async *[Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
     try {
       while (true) {
@@ -176,34 +245,18 @@ export interface StreamStart {
 
 export function streamStart(req: Request): StreamStart {
   const wit = req.toWit();
-  const raw: HttpStreamStartResponse = callHost(
+  const inner: WitHttpStream = callHost(
     `http.streamStart ${req.method} ${req.url}`,
     () => hostStreamStart(wit),
   );
-  return {
-    handle: new HttpStreamHandle(raw.handle),
-    status: raw.status,
-    headers: new Map(raw.headers.map((h: KeyValuePair) => [h.key, h.value])),
-  };
+  const handle = new HttpStreamHandle(inner);
+  return { handle, status: handle.status, headers: handle.headers };
 }
 
 // ---------------------------------------------------------------------------
 // WHATWG fetch polyfill
 // ---------------------------------------------------------------------------
 
-/**
- * Minimal WHATWG `fetch` shim that routes through Astrid's capability-
- * gated HTTP host. Supports the subset of options capsule authors
- * actually need: `method`, `headers`, `body` (string or object → JSON).
- *
- * Not supported: AbortSignal cancellation, streamed request bodies,
- * credentials/CORS (the host doesn't see browser semantics), Response
- * cloning (immutable Response by design). If you need streaming bodies,
- * call `http.streamStart` directly.
- *
- * Install at SDK init: `installFetchPolyfill()`. The bridge sets this up
- * before any user code runs.
- */
 export interface FetchInit {
   method?: string;
   headers?: Record<string, string> | Map<string, string> | [string, string][];
@@ -258,7 +311,7 @@ export async function fetchPolyfill(url: string, init: FetchInit = {}): Promise<
     if (typeof init.body === "string") {
       req.setBody(init.body);
     } else if (init.body instanceof Uint8Array) {
-      req.setBody(new TextDecoder().decode(init.body));
+      req.setBody(init.body);
     } else {
       req.json(init.body);
     }
@@ -267,10 +320,7 @@ export async function fetchPolyfill(url: string, init: FetchInit = {}): Promise<
   return new FetchResponse(url, raw.status, raw.headers.map((h) => [h.key, h.value]), raw.body);
 }
 
-/**
- * Install the polyfill on `globalThis.fetch`, shadowing the engine's
- * built-in fetch (if any). Called by the bridge during capsule init.
- */
+/** Install the polyfill on `globalThis.fetch`. */
 export function installFetchPolyfill(): void {
   (globalThis as unknown as { fetch?: typeof fetchPolyfill }).fetch = fetchPolyfill;
 }
@@ -284,8 +334,6 @@ function normalizeHeaders(
 }
 
 function httpStatusText(code: number): string {
-  // Minimal lookup table. Capsule authors rarely care about the precise
-  // text; if needed, they can check `status` directly.
   const map: Record<number, string> = {
     200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
     301: "Moved Permanently", 302: "Found", 304: "Not Modified",

@@ -6,7 +6,8 @@
  */
 
 import { capsule, tool, interceptor, install, upgrade, log, ipc } from "@astrid-os/sdk";
-import type { TestEvent } from "../gen/events.js";
+import type { events } from "../gen/events.js";
+type TestEvent = events.TestEvent;
 
 @capsule
 export class TestCapsule {

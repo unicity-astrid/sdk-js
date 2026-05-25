@@ -6,10 +6,12 @@
  * builder to enforce `allow_prompt_injection` gating, for example.
  *
  * Fail-closed: returns `false` for unknown UUIDs, unknown capabilities, or
- * registry errors.
+ * registry-unavailable conditions (the host returns `registry-unavailable`,
+ * which `callHost` raises as a SysError — capsule code that wants to swallow
+ * registry outages should wrap the call).
  */
 
-import { checkCapsuleCapability } from "astrid:capsule/sys@0.1.0";
+import { checkCapsuleCapability } from "astrid:sys/host@1.0.0";
 import { callHost } from "./errors.js";
 
 export function check(sourceUuid: string, capability: string): boolean {
