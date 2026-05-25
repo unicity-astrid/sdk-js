@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.ts'
+      - '**.tsx'
+      - '**.mjs'
+      - '**.js'
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '**/tsconfig*.json'
+      - 'contracts/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.ts'
+      - '**.tsx'
+      - '**.mjs'
+      - '**.js'
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '**/tsconfig*.json'
+      - 'contracts/**'
+      - '.github/workflows/**'
+
+jobs:
+  build:
+    name: Build (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `contracts/` is the unicity-astrid/wit submodule; astrid-build
+          # stages WIT files from it at build time and astrid-sdk's
+          # codegen consumes the bundled mirror. Without recursive
+          # checkout the build step fails reading contracts/host.
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace
+        # Runs `tsc` in every package + componentizes the example
+        # capsule. Implicit type-check pass for all .ts files.
+        run: npm run build
+
+      - name: Run tests
+        # No-op for packages without a test script today; reserved for
+        # when astrid-sdk grows a unit-test surface.
+        run: npm test
+
+  wit-sync:
+    name: WIT mirror in sync with canonical
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check contracts WIT mirror
+        # Generated artifact must stay in lockstep with
+        # contracts/interfaces/*.wit. If anyone hand-edits the bundle
+        # the canonical source drifts; this guards against that.
+        run: scripts/sync-contracts-wit.sh --check
