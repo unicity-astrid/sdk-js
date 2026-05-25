@@ -1,5 +1,5 @@
 {
-  "name": "@astrid-os/sdk",
+  "name": "@unicity-astrid/sdk",
   "version": "0.1.0",
   "description": "System SDK for building user-space capsules for Astrid OS in JavaScript and TypeScript.",
   "type": "module",
@@ -30,7 +30,7 @@
     "clean": "rm -rf dist src/contracts.ts"
   },
   "devDependencies": {
-    "@astrid-os/build": "*"
+    "@unicity-astrid/build": "*"
   },
   "engines": {
     "node": ">=20"

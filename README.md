@@ -12,17 +12,17 @@ Companion to [sdk-rust](https://github.com/unicity-astrid/sdk-rust). Same WIT co
 
 | Package | Role |
 |---|---|
-| `@astrid-os/sdk` | The capsule author API. Module-by-module mirror of `astrid-sdk`'s `prelude` — `fs`, `net`, `process`, `env`, `time`, `log`, plus Astrid-specific `ipc`, `kv`, `http`, `hooks`, `uplink`, `identity`, `approval`, `runtime`, `elicit`, `capabilities`, `interceptors`. TypeScript decorators (`@capsule`, `@tool`, `@interceptor`, `@command`, `@install`, `@upgrade`, `@run`) replace `#[capsule]`. |
-| `@astrid-os/build` | Build orchestrator. Runs `tsc` + esbuild + ComponentizeJS programmatic API. Emits a `wasm32-wasip2` component that the Rust-side `astrid-build` packs into a `.capsule` archive. |
-| `@astrid-os/sdk/contracts` | Auto-generated TS types from `astrid-contracts.wit` — IPC event types (`Message`, `ToolCall`, `GenerateRequest`, `StreamEvent`, etc.) usable on both ends of cross-capsule IPC. |
+| `@unicity-astrid/sdk` | The capsule author API. Module-by-module mirror of `astrid-sdk`'s `prelude` — `fs`, `net`, `process`, `env`, `time`, `log`, plus Astrid-specific `ipc`, `kv`, `http`, `hooks`, `uplink`, `identity`, `approval`, `runtime`, `elicit`, `capabilities`, `interceptors`. TypeScript decorators (`@capsule`, `@tool`, `@interceptor`, `@command`, `@install`, `@upgrade`, `@run`) replace `#[capsule]`. |
+| `@unicity-astrid/build` | Build orchestrator. Runs `tsc` + esbuild + ComponentizeJS programmatic API. Emits a `wasm32-wasip2` component that the Rust-side `astrid-build` packs into a `.capsule` archive. |
+| `@unicity-astrid/sdk/contracts` | Auto-generated TS types from `astrid-contracts.wit` — IPC event types (`Message`, `ToolCall`, `GenerateRequest`, `StreamEvent`, etc.) usable on both ends of cross-capsule IPC. |
 
 ## Quick start
 
 ```bash
 mkdir my-capsule && cd my-capsule
 npm init -y
-npm install @astrid-os/sdk
-npm install --save-dev @astrid-os/build typescript
+npm install @unicity-astrid/sdk
+npm install --save-dev @unicity-astrid/build typescript
 ```
 
 `Capsule.toml`:
@@ -45,7 +45,7 @@ kv = ["*"]
 `src/index.ts`:
 
 ```typescript
-import { capsule, tool, install, log, kv } from "@astrid-os/sdk";
+import { capsule, tool, install, log, kv } from "@unicity-astrid/sdk";
 
 @capsule
 export class MyCapsule {
@@ -80,14 +80,14 @@ End-to-end pipeline:
 ```
 src/*.ts
    ↓  tsc (typecheck + emit dist/*.js)
-   ↓  esbuild (bundle dist/ + @astrid-os/sdk into one ESM, mark astrid:* WIT specifiers external)
+   ↓  esbuild (bundle dist/ + @unicity-astrid/sdk into one ESM, mark astrid:* WIT specifiers external)
    ↓  ComponentizeJS programmatic API (StarlingMonkey + your bundle → wasip2 Component)
 target/<name>.wasm
    ↓  pack_capsule_archive (Rust side)
 dist/<name>.capsule (Capsule.toml + .wasm + wit/, gzipped tar)
 ```
 
-`tsc` and esbuild run from `@astrid-os/build/src/index.mjs` — a small Node CLI invoked by Rust's `astrid build` when it detects a `package.json + Capsule.toml` project.
+`tsc` and esbuild run from `@unicity-astrid/build/src/index.mjs` — a small Node CLI invoked by Rust's `astrid build` when it detects a `package.json + Capsule.toml` project.
 
 ## Trade-off: binary size
 
@@ -100,8 +100,8 @@ The host ABI is identical, so a hot capsule can be ported between languages with
 ```
 sdk-js/
 ├── packages/
-│   ├── astrid-sdk/        @astrid-os/sdk — public API
-│   ├── astrid-build/      @astrid-os/build — build orchestrator
+│   ├── astrid-sdk/        @unicity-astrid/sdk — public API
+│   ├── astrid-build/      @unicity-astrid/build — build orchestrator
 │   └── ...
 ├── examples/
 │   └── test-capsule/      Minimal end-to-end example mirroring sdk-rust/examples/test-capsule
@@ -114,7 +114,7 @@ sdk-js/
 
 ```bash
 npm install
-npm --workspace @astrid-os/sdk run build
+npm --workspace @unicity-astrid/sdk run build
 node packages/astrid-build/src/index.mjs examples/test-capsule
 ```
 
