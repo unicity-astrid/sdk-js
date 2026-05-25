@@ -1,4 +1,4 @@
-// Public API of @astrid-os/sdk.
+// Public API of @unicity-astrid/sdk.
 //
 // Module-by-module mirror of `astrid_sdk::prelude`, with idiom translated
 // from Rust-std to Node/WHATWG conventions where appropriate.
@@ -16,7 +16,7 @@ export {
 } from "./tool.js";
 
 // Namespaced submodules. Authors import as
-// `import { fs, http, ipc, ... } from "@astrid-os/sdk"` and call
+// `import { fs, http, ipc, ... } from "@unicity-astrid/sdk"` and call
 // `await fs.readFile(...)`, `ipc.publish(...)`, etc.
 export * as log from "./log.js";
 export * as kv from "./kv.js";

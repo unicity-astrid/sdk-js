@@ -5,7 +5,7 @@
  * `wit_events`-derived TS type.
  */
 
-import { capsule, tool, interceptor, install, upgrade, log, ipc } from "@astrid-os/sdk";
+import { capsule, tool, interceptor, install, upgrade, log, ipc } from "@unicity-astrid/sdk";
 import type { events } from "../gen/events.js";
 type TestEvent = events.TestEvent;
 

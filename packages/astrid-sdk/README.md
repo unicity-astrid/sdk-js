@@ -1,4 +1,4 @@
-# @astrid-os/sdk
+# @unicity-astrid/sdk
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](../../LICENSE-MIT)
 [![Node: >=20](https://img.shields.io/badge/Node-%3E%3D20-blue)](https://nodejs.org)
@@ -13,7 +13,7 @@ Sibling of [`astrid-sdk`](https://github.com/unicity-astrid/sdk-rust) (Rust). Sa
 ```text
 Capsule code (TypeScript or JavaScript)
     |
-  @astrid-os/sdk           typed modules: fs, net, ipc, kv, http, ...
+  @unicity-astrid/sdk           typed modules: fs, net, ipc, kv, http, ...
     |
   WIT-imported bindings    "astrid:<domain>/host@1.0.0" + "astrid:io/*@1.0.0" (ComponentizeJS-generated)
     |
@@ -60,12 +60,12 @@ TypeScript 5.2+ standard decorators (TC39 Stage 3). No `experimentalDecorators` 
 ## Quick start
 
 ```bash
-npm install @astrid-os/sdk
-npm install --save-dev @astrid-os/build typescript
+npm install @unicity-astrid/sdk
+npm install --save-dev @unicity-astrid/build typescript
 ```
 
 ```typescript
-import { capsule, tool, install, log, kv } from "@astrid-os/sdk";
+import { capsule, tool, install, log, kv } from "@unicity-astrid/sdk";
 
 @capsule
 export class MyCapsule {
@@ -85,7 +85,7 @@ export class MyCapsule {
 }
 ```
 
-`astrid build` (from the Rust kernel CLI) detects `package.json + Capsule.toml`, shells out to the `@astrid-os/build` Node orchestrator, and emits a `.capsule` archive packaged identically to a Rust capsule's.
+`astrid build` (from the Rust kernel CLI) detects `package.json + Capsule.toml`, shells out to the `@unicity-astrid/build` Node orchestrator, and emits a `.capsule` archive packaged identically to a Rust capsule's.
 
 ## Error model: throw, don't `Result`
 
@@ -107,9 +107,9 @@ The bridge auto-generates the `tool_describe` aggregated schema payload (lazy, c
 
 | Import | Contents |
 |---|---|
-| `@astrid-os/sdk` | Public API barrel |
-| `@astrid-os/sdk/runtime` | Internal registry + bridge — exposed for advanced authors only |
-| `@astrid-os/sdk/contracts` | Auto-generated TS types from `astrid-contracts.wit` (`Message`, `ToolCall`, `GenerateRequest`, `StreamEvent`, etc.) |
+| `@unicity-astrid/sdk` | Public API barrel |
+| `@unicity-astrid/sdk/runtime` | Internal registry + bridge — exposed for advanced authors only |
+| `@unicity-astrid/sdk/contracts` | Auto-generated TS types from `astrid-contracts.wit` (`Message`, `ToolCall`, `GenerateRequest`, `StreamEvent`, etc.) |
 
 ## Status
 

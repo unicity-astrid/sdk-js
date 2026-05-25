@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@astrid-os/sdk` and `@astrid-os/build` are documented
+All notable changes to `@unicity-astrid/sdk` and `@unicity-astrid/build` are documented
 in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
@@ -103,7 +103,7 @@ the per-domain WIT host ABI introduced alongside the merged
 
 ### Changed
 
-- **Build orchestrator** (`@astrid-os/build`) synthesises a capsule world
+- **Build orchestrator** (`@unicity-astrid/build`) synthesises a capsule world
   in `<projectDir>/gen/wit/capsule.wit` mirroring the Rust SDK's
   `astrid-sys` synthetic world. Capsules no longer need to declare their
   own world for the common case.
