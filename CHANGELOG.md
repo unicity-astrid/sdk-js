@@ -5,6 +5,13 @@ in this file. The format follows [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-26
+
+First non-prerelease. `0.1.0-alpha.0` was the test version; this is the
+first release intended for capsule consumers. The contract surface is
+the per-domain WIT host ABI introduced alongside the merged
+`unicity-astrid/wit` 1.0.0 packages.
+
 ### Breaking
 
 - **Per-domain WIT host ABI.** The monolithic `astrid:capsule@0.1.0` world has
