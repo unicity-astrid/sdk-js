@@ -25,8 +25,8 @@ import {
   type TcpStream as WitTcpStream,
   type UdpSocket as WitUdpSocket,
 } from "astrid:net/host@1.0.0";
-import { clockMs as hostClockMs } from "astrid:sys/host@1.0.0";
 import { SysError, callHost } from "./errors.js";
+import { sleepMs as hostSleepMs } from "./time.js";
 
 export type { ShutdownHow, NetReadStatus, UdpDatagram } from "astrid:net/host@1.0.0";
 
@@ -309,15 +309,6 @@ export class TcpStream {
     return callHost("net.TcpStream.hopLimit", () => this.#requireInner().hopLimit());
   }
 
-  /** Backwards-compat alias for {@link setHopLimit} matching the pre-migration name. */
-  setTtl(ttl: number): void {
-    this.setHopLimit(ttl);
-  }
-
-  ttl(): number {
-    return this.hopLimit();
-  }
-
   /** TCP keepalive probe interval in seconds (`undefined` disables). */
   setKeepalive(keepaliveSecs: number | undefined): void {
     const v = keepaliveSecs === undefined ? undefined : BigInt(Math.max(0, Math.floor(keepaliveSecs)));
@@ -544,14 +535,11 @@ export function lookupHost(host: string): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * 50 ms busy-wait against the host clock. StarlingMonkey's syncify wraps the
- * surrounding polling-loop into a single blocking host call from the kernel's
- * POV. Not exposed publicly; authors who need a real sleep should use IPC's
- * `recv(timeoutMs)` or `sys::sleepNs`.
+ * 50 ms host-mediated sleep. Routes through `astrid:sys/host.sleep-ns`
+ * so the kernel can cancel the wait when the capsule unloads and
+ * account for the wait in audit. Mirrors the Rust SDK switch from
+ * `std::thread::sleep` to `crate::time::sleep`.
  */
 function sleepMs(ms: number): void {
-  const deadline = hostClockMs() + BigInt(ms);
-  while (hostClockMs() < deadline) {
-    // spin
-  }
+  hostSleepMs(ms);
 }
