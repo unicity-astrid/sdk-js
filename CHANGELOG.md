@@ -5,6 +5,18 @@ in this file. The format follows [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [`@unicity-astrid/build` 0.1.1] - 2026-05-26
+
+### Fixed
+
+- **`@unicity-astrid/build`**: SDK runtime resolution. The build tool hard-coded
+  `../../astrid-sdk` relative to its own source, which only resolved correctly
+  when installed via `file:` link in a sibling-package layout. Consumers installing
+  `@unicity-astrid/build` from the npm registry hit `SDK runtime not found at
+  .../node_modules/@unicity-astrid/astrid-sdk/...`. Switched to Node's
+  `createRequire(...).resolve("@unicity-astrid/sdk/runtime")` so resolution works
+  in both workspace and registry-install modes.
+
 ## [0.1.0] - 2026-05-26
 
 First non-prerelease. `0.1.0-alpha.0` was the test version; this is the

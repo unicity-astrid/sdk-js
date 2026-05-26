@@ -31,14 +31,37 @@ import { createRequire } from "node:module";
 import ts from "typescript";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SDK_PKG_DIR = resolve(HERE, "..", "..", "astrid-sdk");
 // Canonical host ABI lives in the unicity-astrid/wit submodule (mounted at
 // repo-root/contracts/). Post per-domain WIT split (PR #752), each domain
 // is a separate `astrid:<domain>/host@1.0.0` package plus the foundation
 // `astrid:io/*@1.0.0` interfaces; componentize-js resolves the world the
 // capsule declares by reading every file in this directory.
-const REPO_ROOT = resolve(HERE, "..", "..", "..");
-const CANONICAL_WIT_DIR = resolve(REPO_ROOT, "contracts", "host");
+//
+// Two resolution paths:
+//
+//   - Workspace builds (developer editing sdk-js): read the canonical
+//     files directly from the contracts submodule at the repo root, so
+//     per-domain WIT edits are picked up without a re-sync step.
+//   - Published-package builds (`npm install @unicity-astrid/build`):
+//     the submodule isn't part of the tarball, so fall back to the
+//     committed copy in `wit-staging/host/` (kept in sync with the
+//     canonical source via `scripts/sync-build-wit.sh`).
+const WORKSPACE_HOST_WIT = resolve(HERE, "..", "..", "..", "contracts", "host");
+const STAGED_HOST_WIT = resolve(HERE, "..", "wit-staging", "host");
+
+function resolveCanonicalHostWit() {
+  if (existsSync(join(WORKSPACE_HOST_WIT, "ipc@1.0.0.wit"))) {
+    return WORKSPACE_HOST_WIT;
+  }
+  if (existsSync(join(STAGED_HOST_WIT, "ipc@1.0.0.wit"))) {
+    return STAGED_HOST_WIT;
+  }
+  die(
+    `canonical host WIT not found at ${WORKSPACE_HOST_WIT} or ${STAGED_HOST_WIT}. ` +
+      `If working from the sdk-js repo, run 'git submodule update --init --recursive'; ` +
+      `otherwise, reinstall @unicity-astrid/build (the published tarball should include wit-staging/host/).`,
+  );
+}
 
 function die(msg) {
   console.error(`astrid-js-build: ${msg}`);
@@ -111,14 +134,19 @@ function resolveEntry(projectDir, outDir) {
 }
 
 function resolveSdkRuntime() {
-  const candidate = join(SDK_PKG_DIR, "dist", "runtime", "index.js");
-  if (!existsSync(candidate)) {
+  // import.meta.resolve uses the ESM resolver, which honors the
+  // `exports.import` condition on @unicity-astrid/sdk's `./runtime`
+  // subpath. createRequire().resolve uses the CJS resolver, which only
+  // sees `exports.require` and would fail against an import-only
+  // exports map.
+  try {
+    return fileURLToPath(import.meta.resolve("@unicity-astrid/sdk/runtime"));
+  } catch (err) {
     die(
-      `SDK runtime not found at ${candidate}. ` +
-        `Build @unicity-astrid/sdk first (npx tsc -b packages/astrid-sdk in the workspace root).`,
+      `@unicity-astrid/sdk/runtime is not resolvable (${err.message}). ` +
+        `Ensure @unicity-astrid/sdk is installed in the project.`,
     );
   }
-  return candidate;
 }
 
 async function emitEntry(projectDir, userEntry) {
@@ -317,20 +345,7 @@ async function bundle(entryPath, projectDir) {
 }
 
 function resolveWitPath() {
-  // Read straight from the canonical `unicity-astrid/wit` submodule. The
-  // kernel side (cargo-published `astrid-sys` crate) keeps an in-tree copy
-  // because `cargo package` only bundles files inside the crate dir; the
-  // JS SDK has no such constraint, so we consume the submodule directly
-  // and skip the drift surface entirely. Sanity-check that the per-domain
-  // split landed — `ipc@1.0.0.wit` is the canary file that appears on the
-  // new layout but never the old.
-  if (!existsSync(join(CANONICAL_WIT_DIR, "ipc@1.0.0.wit"))) {
-    die(
-      `canonical host WIT missing or pre-split at ${CANONICAL_WIT_DIR}. ` +
-        `Expected per-domain layout from unicity-astrid/wit; run 'git submodule update --init --recursive' from the sdk-js repo root.`,
-    );
-  }
-  return CANONICAL_WIT_DIR;
+  return resolveCanonicalHostWit();
 }
 
 /**
@@ -360,7 +375,8 @@ async function stageCapsuleWit(projectDir) {
 
   // Map of <wit-file-name> → <deps subdir name> (the bare package name
   // without the version is the conventional subdir).
-  const hostFiles = await readdir(CANONICAL_WIT_DIR);
+  const canonicalWitDir = resolveCanonicalHostWit();
+  const hostFiles = await readdir(canonicalWitDir);
   const stagedPkgs = [];
   for (const fname of hostFiles) {
     if (!fname.endsWith(".wit")) continue;
@@ -368,7 +384,7 @@ async function stageCapsuleWit(projectDir) {
     const bare = fname.replace(/@.*$/, "");
     const subdir = join(depsDir, `astrid-${bare}`);
     await mkdir(subdir, { recursive: true });
-    await copyFile(join(CANONICAL_WIT_DIR, fname), join(subdir, fname));
+    await copyFile(join(canonicalWitDir, fname), join(subdir, fname));
     stagedPkgs.push(bare);
   }
 
