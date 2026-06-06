@@ -28,6 +28,10 @@
 # Verify only:  scripts/sync-build-wit.sh --check
 
 set -euo pipefail
+# Expand non-matching globs to nothing instead of the literal pattern, so an
+# empty/uninitialised source or destination dir never feeds a literal "*.wit"
+# to cp/rm.
+shopt -s nullglob
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="$ROOT/contracts/host"
@@ -39,10 +43,21 @@ if [[ ! -d "$SRC_DIR" ]]; then
   exit 1
 fi
 
+# Collect the canonical .wit files once. With nullglob this is an empty array
+# when SRC_DIR exists but holds no .wit (e.g. an uninitialised submodule
+# checked out as an empty dir) — guard that explicitly rather than letting a
+# literal "*.wit" reach cp below.
+src_files=("$SRC_DIR"/*.wit)
+if [[ ${#src_files[@]} -eq 0 ]]; then
+  echo "sync-build-wit: no .wit files in $SRC_DIR" >&2
+  echo "sync-build-wit: did you forget 'git submodule update --init'?" >&2
+  exit 1
+fi
+
 if [[ "${1:-}" == "--check" ]]; then
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
-  cp "$SRC_DIR"/*.wit "$tmp/"
+  cp "${src_files[@]}" "$tmp/"
   if ! diff -rq "$tmp" "$DST_DIR" >/dev/null 2>&1; then
     echo "sync-build-wit: $DST_DIR is out of sync with $SRC_DIR" >&2
     echo "sync-build-wit: run scripts/sync-build-wit.sh to fix" >&2
@@ -56,11 +71,11 @@ fi
 mkdir -p "$DST_DIR"
 # Sync exactly: copy all .wit, then remove any stale files in DST that
 # the canonical source no longer has.
-cp "$SRC_DIR"/*.wit "$DST_DIR/"
+cp "${src_files[@]}" "$DST_DIR/"
 for f in "$DST_DIR"/*.wit; do
   base=$(basename "$f")
   if [[ ! -f "$SRC_DIR/$base" ]]; then
     rm "$f"
   fi
 done
-echo "sync-build-wit: $DST_DIR ← $SRC_DIR/*.wit ($(ls "$SRC_DIR" | grep -c '\.wit$' | tr -d ' ') files)"
+echo "sync-build-wit: $DST_DIR ← $SRC_DIR/*.wit (${#src_files[@]} files)"
