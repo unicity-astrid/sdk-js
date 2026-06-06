@@ -38,8 +38,10 @@ file = "my-capsule.wasm"
 type = "executable"
 
 [capabilities]
-ipc_publish = ["tool.v1.execute.*"]
 kv = ["*"]
+
+[publish]
+"tool.v1.execute.*" = { wit = "opaque" }
 ```
 
 `src/index.ts`:
