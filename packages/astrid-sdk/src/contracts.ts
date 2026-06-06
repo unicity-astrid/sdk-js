@@ -225,6 +225,35 @@ export namespace hook {
     data?: string;
   }
 
+  /**
+   * Payload of `hook.v1.event.<hook_name>` envelopes published by the
+   * hook bridge during fan-out to subscriber capsules.
+   * 
+   * Subscribers wishing to influence the outcome (merge strategies
+   * `ToolCallBefore` / `LastNonNull`) reply on the per-request
+   * scoped topic `hook.v1.response.<hook_name>.<correlation_id>`.
+   * When `correlation_id` is absent, the dispatch is fire-and-forget
+   * (merge semantics `None`) and no reply topic exists.
+   */
+  export interface HookEventRequest {
+    /**
+     * Semantic hook name (e.g. `before_tool_call`, `session_start`,
+     * `on_compaction_started`). Matches the mapping table in
+     * `astrid-capsule-hook-bridge`.
+     */
+    hook: string;
+    /**
+     * Original lifecycle event payload, serialized as JSON. Opaque
+     * to the bus — subscribers parse based on the hook name.
+     */
+    payload: string;
+    /**
+     * Per-request correlation id for scoped replies. `none` for
+     * fire-and-forget hooks.
+     */
+    correlation_id?: string;
+  }
+
 }
 
 /** Types generated from the `llm` WIT interface. */
