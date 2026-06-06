@@ -14,14 +14,38 @@
 import {
   spawn as hostSpawn,
   spawnBackground as hostSpawnBackground,
+  spawnPersistent as hostSpawnPersistent,
+  listProcesses as hostListProcesses,
+  status as hostStatus,
+  statusMany as hostStatusMany,
+  readLogs as hostReadLogsById,
+  readSince as hostReadSince,
+  writeStdin as hostWriteStdinById,
+  closeStdin as hostCloseStdinById,
+  signal as hostSignalById,
+  wait as hostWaitById,
+  stop as hostStop,
+  releaseProcess as hostReleaseProcess,
   type ProcessHandle as WitProcessHandle,
   type ProcessSignal,
   type SpawnRequest,
   type ExitInfo,
+  type ProcessInfo as WitProcessInfo,
+  type ProcessPhase,
+  type LogStream,
+  type LogCursor,
+  type OverflowPolicy,
 } from "astrid:process/host@1.0.0";
 import { SysError, callHost } from "./errors.js";
 
-export type { ProcessSignal, EnvVar } from "astrid:process/host@1.0.0";
+export type {
+  ProcessSignal,
+  EnvVar,
+  ProcessPhase,
+  LogStream,
+  LogCursor,
+  OverflowPolicy,
+} from "astrid:process/host@1.0.0";
 
 export interface ProcessResult {
   stdout: string;
@@ -70,6 +94,16 @@ function buildSpawnRequest(
       ? Object.entries(options.env).map(([key, value]) => ({ key, value }))
       : [],
     cwd: options?.cwd,
+    // Persistent-only fields — left unset for the ephemeral `spawn` /
+    // `spawnBackground` paths (the host ignores them there anyway).
+    limits: undefined,
+    label: undefined,
+    keepStdinOpen: undefined,
+    overflow: undefined,
+    logRingBytes: undefined,
+    maxLifetimeMs: undefined,
+    idleTimeoutMs: undefined,
+    exitRetentionMs: undefined,
   };
 }
 
@@ -202,4 +236,283 @@ export class BackgroundProcessHandle {
     if (this.#inner === undefined) throw SysError.api("ProcessHandle is closed");
     return this.#inner;
   }
+}
+
+// ============================================================
+// Persistent tier
+//
+// A persistent process survives the pooled, stateless instance that spawned
+// it (unlike the ephemeral `BackgroundProcessHandle`, whose kernel resource is
+// reaped on instance reset). It is keyed by an opaque process id that any
+// later invocation of the same capsule+principal can `attach` to.
+// ============================================================
+
+/** Per-child OS resource ceilings. (Host enforcement is not yet wired.) */
+export interface ResourceLimits {
+  maxMemoryBytes?: number;
+  maxCpuSecs?: number;
+  maxPids?: number;
+  maxOpenFiles?: number;
+}
+
+/** Options for {@link spawnPersistent} — `SpawnOptions` plus persistent knobs. */
+export interface SpawnPersistentOptions extends SpawnOptions {
+  /** Operator-readable label surfaced in {@link listProcesses} / status. */
+  label?: string;
+  /** Keep stdin open after the prelude so {@link PersistentProcess.writeStdin} works. */
+  keepStdinOpen?: boolean;
+  /** Per-stream ring overflow policy (default `drop-oldest`). */
+  overflow?: OverflowPolicy;
+  /** Per-stream output ring capacity in bytes. */
+  logRingBytes?: number;
+  /** Wall-clock lifetime ceiling (ms). Clamped DOWN to the host ceiling. */
+  maxLifetimeMs?: number;
+  /** Reap if untouched for this long (ms) — anti-leak backstop. */
+  idleTimeoutMs?: number;
+  /** Retain id + log tail this long (ms) after exit. */
+  exitRetentionMs?: number;
+  /** Per-child OS resource ceilings. */
+  limits?: ResourceLimits;
+}
+
+/** A non-draining status snapshot of one persistent process. */
+export interface PersistentProcessInfo {
+  /** Reattach key, stable across invocations / instances. */
+  id: string;
+  label: string;
+  command: string;
+  /** OS PID while running; `undefined` once reaped. Advisory only. */
+  osPid: number | undefined;
+  phase: ProcessPhase;
+  exitCode: number | undefined;
+  signal: number | undefined;
+  ageMs: number;
+  idleMs: number;
+  bufferedBytes: number;
+  bytesDropped: number;
+  stdinOpen: boolean;
+  /** Cumulative CPU ms. `undefined` until the host populates it. */
+  cpuMs: number | undefined;
+  /** Peak resident memory. `undefined` until the host populates it. */
+  memBytesPeak: number | undefined;
+}
+
+/** A non-draining, cursor-addressed slice of a persistent process's stream. */
+export interface LogChunkResult {
+  /** Byte-faithful bytes in `[requested-cursor, next)`. */
+  data: Uint8Array;
+  /** Opaque cursor to pass to the next {@link PersistentProcess.readSince}. */
+  next: LogCursor;
+  /** Bytes evicted before delivery through this cursor (0 unless behind). */
+  bytesDropped: number;
+  /** `true` once the child exited AND all retained output was delivered. */
+  drainedEof: boolean;
+}
+
+/** An opaque cursor positioned at the oldest retained byte. */
+export function logCursorStart(): LogCursor {
+  return { token: undefined };
+}
+
+function toBigIntMs(ms: number | undefined): bigint | undefined {
+  return ms === undefined ? undefined : BigInt(Math.max(0, Math.floor(ms)));
+}
+
+function buildPersistentRequest(
+  cmd: string,
+  args: string[],
+  options: SpawnPersistentOptions | undefined,
+): SpawnRequest {
+  const base = buildSpawnRequest(cmd, args, options);
+  return {
+    ...base,
+    label: options?.label,
+    keepStdinOpen: options?.keepStdinOpen,
+    overflow: options?.overflow,
+    logRingBytes: options?.logRingBytes,
+    maxLifetimeMs: toBigIntMs(options?.maxLifetimeMs),
+    idleTimeoutMs: toBigIntMs(options?.idleTimeoutMs),
+    exitRetentionMs: toBigIntMs(options?.exitRetentionMs),
+    limits: options?.limits
+      ? {
+          maxMemoryBytes:
+            options.limits.maxMemoryBytes === undefined
+              ? undefined
+              : BigInt(Math.max(0, Math.floor(options.limits.maxMemoryBytes))),
+          maxCpuSecs:
+            options.limits.maxCpuSecs === undefined
+              ? undefined
+              : BigInt(Math.max(0, Math.floor(options.limits.maxCpuSecs))),
+          maxPids: options.limits.maxPids,
+          maxOpenFiles: options.limits.maxOpenFiles,
+        }
+      : undefined,
+  };
+}
+
+function unpackInfo(i: WitProcessInfo): PersistentProcessInfo {
+  return {
+    id: i.id,
+    label: i.label,
+    command: i.command,
+    osPid: i.osPid,
+    phase: i.phase,
+    exitCode: i.exit?.exitCode,
+    signal: i.exit?.signal,
+    ageMs: Number(i.ageMs),
+    idleMs: Number(i.idleMs),
+    bufferedBytes: Number(i.bufferedBytes),
+    bytesDropped: Number(i.bytesDropped),
+    stdinOpen: i.stdinOpen,
+    cpuMs: i.cpuMs === undefined ? undefined : Number(i.cpuMs),
+    memBytesPeak: i.memBytesPeak === undefined ? undefined : Number(i.memBytesPeak),
+  };
+}
+
+/**
+ * Spawn a PERSISTENT background process whose lifetime is decoupled from the
+ * calling instance. Returns a {@link PersistentProcess} keyed by an opaque id
+ * that any LATER invocation of the same capsule+principal can {@link attach}
+ * to — unlike {@link spawnBackground}, it survives the pooled instance being
+ * reset between tool invocations.
+ */
+export function spawnPersistent(
+  cmd: string,
+  args: string[] = [],
+  options?: SpawnPersistentOptions,
+): PersistentProcess {
+  const request = buildPersistentRequest(cmd, args, options);
+  const id = callHost(`process.spawnPersistent(${JSON.stringify(cmd)})`, () =>
+    hostSpawnPersistent(request),
+  );
+  return new PersistentProcess(id);
+}
+
+/**
+ * A handle to a PERSISTENT background process, keyed by its opaque id.
+ *
+ * Unlike {@link BackgroundProcessHandle}, this does NOT reap the underlying
+ * process when it goes out of scope — it is a detached view. The process is
+ * reaped only by {@link stop}, {@link release}, or the host's idle /
+ * max-lifetime / exit-retention TTLs. Obtain one from {@link spawnPersistent}
+ * or {@link attach}.
+ */
+export class PersistentProcess {
+  readonly #id: string;
+
+  constructor(id: string) {
+    this.#id = id;
+  }
+
+  /** The opaque process id — persist it (e.g. in KV) to {@link attach} later. */
+  get id(): string {
+    return this.#id;
+  }
+
+  /** Non-draining status snapshot. */
+  status(): PersistentProcessInfo {
+    return unpackInfo(callHost("process.status", () => hostStatus(this.#id)));
+  }
+
+  /**
+   * Drain newly-buffered stdout/stderr since the last read. Drains the single
+   * shared ring — for independent multi-reader or byte-faithful reads use
+   * {@link readSince}.
+   */
+  readLogs(): ProcessLogs {
+    const r = callHost("process.readLogs", () => hostReadLogsById(this.#id));
+    return {
+      stdout: r.stdout,
+      stderr: r.stderr,
+      running: r.running,
+      exitCode: r.exit?.exitCode,
+      signal: r.exit?.signal,
+    };
+  }
+
+  /**
+   * Non-draining, cursor-addressed, byte-faithful read of one stream. Start
+   * with {@link logCursorStart}; pass {@link LogChunkResult.next} back to resume.
+   */
+  readSince(stream: LogStream, cursor: LogCursor, maxBytes: number): LogChunkResult {
+    const r = callHost("process.readSince", () =>
+      hostReadSince(this.#id, stream, cursor, maxBytes),
+    );
+    return {
+      data: r.data,
+      next: r.next,
+      bytesDropped: Number(r.bytesDropped),
+      drainedEof: r.drainedEof,
+    };
+  }
+
+  /** Write to stdin (requires `keepStdinOpen`). Returns bytes written. */
+  writeStdin(data: Uint8Array): number {
+    return callHost("process.writeStdin", () => hostWriteStdinById(this.#id, data));
+  }
+
+  /** Close stdin; the child observes EOF on read. */
+  closeStdin(): void {
+    callHost("process.closeStdin", () => hostCloseStdinById(this.#id));
+  }
+
+  /** Send a fire-and-forget signal. */
+  signal(sig: ProcessSignal): void {
+    callHost(`process.signal(${sig})`, () => hostSignalById(this.#id, sig));
+  }
+
+  /**
+   * Wait up to `timeoutMs` for the process to exit. Bounded by design — an
+   * unbounded wait would pin the pooled instance. Does NOT reap.
+   */
+  wait(timeoutMs: number): { exitCode: number | undefined; signal: number | undefined } {
+    const ms = BigInt(Math.max(0, Math.floor(timeoutMs)));
+    const exit = callHost(`process.wait(${timeoutMs})`, () => hostWaitById(this.#id, ms));
+    return unpackExit(exit);
+  }
+
+  /**
+   * Graceful terminal stop: SIGTERM, wait up to `graceMs`, then SIGKILL, and
+   * REMOVE the id (frees the slot). `graceMs` undefined uses the host default.
+   * To keep a child's last output, drain it with {@link readSince} BEFORE stop.
+   */
+  stop(graceMs?: number): { exitCode: number | undefined; signal: number | undefined } {
+    const ms = graceMs === undefined ? undefined : BigInt(Math.max(0, Math.floor(graceMs)));
+    const exit = callHost(`process.stop(${graceMs ?? "default"})`, () =>
+      hostStop(this.#id, ms),
+    );
+    return unpackExit(exit);
+  }
+
+  /**
+   * Drop the host's retention of an ALREADY-EXITED process (frees the slot +
+   * discards the buffered tail). Throws if still running — use {@link stop}.
+   */
+  release(): void {
+    callHost("process.releaseProcess", () => hostReleaseProcess(this.#id));
+  }
+}
+
+/**
+ * Reattach to a persistent process by id — e.g. one saved in KV across tool
+ * invocations. Wraps the id; the first id-keyed call validates ownership, so
+ * an id that is unknown / not yours / reaped surfaces `no-such-process` on use.
+ */
+export function attach(id: string): PersistentProcess {
+  return new PersistentProcess(id);
+}
+
+/**
+ * List the calling capsule+principal's persistent processes, optionally
+ * filtered by a label substring. Empty is normal (post-reap recovery signal).
+ */
+export function listProcesses(labelFilter?: string): PersistentProcessInfo[] {
+  return callHost("process.listProcesses", () => hostListProcesses(labelFilter)).map(
+    unpackInfo,
+  );
+}
+
+/** Batch status for many ids in one host call. Unknown / unowned ids are absent. */
+export function statusMany(ids: string[]): PersistentProcessInfo[] {
+  return callHost("process.statusMany", () => hostStatusMany(ids)).map(unpackInfo);
 }

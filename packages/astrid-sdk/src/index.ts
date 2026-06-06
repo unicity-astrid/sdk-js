@@ -75,6 +75,15 @@ export type {
   SpawnOptions,
   ProcessSignal,
   EnvVar,
+  PersistentProcess,
+  PersistentProcessInfo,
+  SpawnPersistentOptions,
+  LogChunkResult,
+  ResourceLimits,
+  ProcessPhase,
+  LogStream,
+  LogCursor,
+  OverflowPolicy,
 } from "./process.js";
 export type { CallerContext } from "./runtime.js";
 export type { ResolvedUser, Link } from "./identity.js";
