@@ -18,7 +18,7 @@ export type { InterceptorBinding } from "./ipc.js";
 /**
  * Query the runtime for auto-subscribed interceptor handles. Returns an
  * empty array if this capsule has no auto-subscribed interceptors (i.e. it
- * does not have both `@run` and `[[interceptor]]`).
+ * does not have both `@run` and a `[subscribe]` entry with a `handler`).
  */
 export function bindings(): InterceptorBinding[] {
   return runtimeInterceptors();

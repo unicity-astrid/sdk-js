@@ -11,9 +11,13 @@ file = "test-capsule.wasm"
 type = "executable"
 
 [capabilities]
-ipc_publish = ["tool.v1.execute.*", "test.v1.event.*"]
 kv = ["*"]
 
-[[interceptor]]
-event = "test.v1.event"
-action = "test.v1.event"
+[publish]
+"tool.v1.execute.*" = { wit = "opaque" }
+"test.v1.event.*" = { wit = "opaque" }
+
+# Interceptor binding: a [subscribe] entry's `handler` binds the topic to the
+# guest handler (the key also grants the subscribe ACL).
+[subscribe]
+"test.v1.event" = { wit = "opaque", handler = "test.v1.event" }
