@@ -462,6 +462,7 @@ declare module "astrid:sys/host@1.0.0" {
   export function checkCapsuleCapability(
     request: CapabilityCheckRequest,
   ): CapabilityCheckResponse;
+  export function enumerateCapabilities(): string[];
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -479,13 +480,36 @@ declare module "astrid:process/host@1.0.0" {
     | { tag: "closed" }
     | { tag: "cancelled" }
     | { tag: "wait-timeout" }
+    | { tag: "no-such-process" }
+    | { tag: "registry-full" }
+    | { tag: "persist-unsupported" }
     | { tag: "unknown"; val: string };
 
-  export type ProcessSignal = "term" | "hup" | "usr1" | "usr2" | "int";
+  export type ProcessSignal =
+    | "term"
+    | "hup"
+    | "usr1"
+    | "usr2"
+    | "int"
+    | "stop"
+    | "cont";
+
+  export type OverflowPolicy = "drop-oldest" | "backpressure";
+
+  export type ProcessPhase = "starting" | "running" | "exited";
+
+  export type LogStream = "stdout" | "stderr";
 
   export interface EnvVar {
     key: string;
     value: string;
+  }
+
+  export interface ResourceLimits {
+    maxMemoryBytes: bigint | undefined;
+    maxCpuSecs: bigint | undefined;
+    maxPids: number | undefined;
+    maxOpenFiles: number | undefined;
   }
 
   export interface SpawnRequest {
@@ -494,6 +518,14 @@ declare module "astrid:process/host@1.0.0" {
     stdin: Uint8Array | undefined;
     env: EnvVar[];
     cwd: string | undefined;
+    limits: ResourceLimits | undefined;
+    label: string | undefined;
+    keepStdinOpen: boolean | undefined;
+    overflow: OverflowPolicy | undefined;
+    logRingBytes: number | undefined;
+    maxLifetimeMs: bigint | undefined;
+    idleTimeoutMs: bigint | undefined;
+    exitRetentionMs: bigint | undefined;
   }
 
   export interface ExitInfo {
@@ -521,6 +553,33 @@ declare module "astrid:process/host@1.0.0" {
     stderr: string;
   }
 
+  export interface LogCursor {
+    token: string | undefined;
+  }
+
+  export interface LogChunk {
+    data: Uint8Array;
+    next: LogCursor;
+    bytesDropped: bigint;
+    drainedEof: boolean;
+  }
+
+  export interface ProcessInfo {
+    id: string;
+    label: string;
+    command: string;
+    osPid: number | undefined;
+    phase: ProcessPhase;
+    exit: ExitInfo | undefined;
+    ageMs: bigint;
+    idleMs: bigint;
+    bufferedBytes: bigint;
+    bytesDropped: bigint;
+    stdinOpen: boolean;
+    cpuMs: bigint | undefined;
+    memBytesPeak: bigint | undefined;
+  }
+
   export class ProcessHandle {
     private constructor();
     readLogs(): ReadLogsResult;
@@ -538,6 +597,30 @@ declare module "astrid:process/host@1.0.0" {
 
   export function spawn(request: SpawnRequest): ProcessResult;
   export function spawnBackground(request: SpawnRequest): ProcessHandle;
+
+  // Persistent tier — free functions. Every id-keyed call re-checks the
+  // caller's (principal, capsule) against the recorded creator host-side;
+  // unknown / wrong-owner / reaped all surface as `no-such-process`.
+  export function spawnPersistent(request: SpawnRequest): string;
+  export function attach(id: string): ProcessHandle;
+  export function listProcesses(labelFilter: string | undefined): ProcessInfo[];
+  export function status(id: string): ProcessInfo;
+  export function statusMany(ids: string[]): ProcessInfo[];
+  export function readLogs(id: string): ReadLogsResult;
+  export function readSince(
+    id: string,
+    whichStream: LogStream,
+    cursor: LogCursor,
+    maxBytes: number,
+  ): LogChunk;
+  export function writeStdin(id: string, data: Uint8Array): number;
+  export function closeStdin(id: string): void;
+  export function signal(id: string, sig: ProcessSignal): void;
+  export function wait(id: string, timeoutMs: bigint): ExitInfo;
+  export function stop(id: string, graceMs: bigint | undefined): ExitInfo;
+  export function releaseProcess(id: string): void;
+  export function watch(id: string, suffix: string | undefined): void;
+  export function unwatch(id: string): void;
 }
 
 // ────────────────────────────────────────────────────────────────────
