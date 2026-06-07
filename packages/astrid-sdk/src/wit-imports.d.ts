@@ -462,6 +462,7 @@ declare module "astrid:sys/host@1.0.0" {
   export function checkCapsuleCapability(
     request: CapabilityCheckRequest,
   ): CapabilityCheckResponse;
+  export function enumerateCapabilities(): string[];
 }
 
 // ────────────────────────────────────────────────────────────────────
