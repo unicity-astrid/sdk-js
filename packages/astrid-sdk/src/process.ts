@@ -314,8 +314,18 @@ export function logCursorStart(): LogCursor {
   return { token: undefined };
 }
 
-function toBigIntMs(ms: number | undefined): bigint | undefined {
-  return ms === undefined ? undefined : BigInt(Math.max(0, Math.floor(ms)));
+/**
+ * Convert an optional millisecond / byte / count knob to a host `bigint`.
+ * Non-finite input (`Infinity` / `NaN`) becomes `undefined` — read as "no
+ * caller limit, use the host default/ceiling" — rather than throwing a cryptic
+ * `RangeError` from `BigInt(Infinity)`. Negatives clamp to 0. Used for the
+ * soft, host-clamped knobs (TTLs, resource limits, stop grace); a required
+ * bounded value like `wait`'s timeout validates and throws instead.
+ */
+function toSafeBigInt(val: number | undefined): bigint | undefined {
+  return val === undefined || !Number.isFinite(val)
+    ? undefined
+    : BigInt(Math.max(0, Math.floor(val)));
 }
 
 function buildPersistentRequest(
@@ -330,19 +340,13 @@ function buildPersistentRequest(
     keepStdinOpen: options?.keepStdinOpen,
     overflow: options?.overflow,
     logRingBytes: options?.logRingBytes,
-    maxLifetimeMs: toBigIntMs(options?.maxLifetimeMs),
-    idleTimeoutMs: toBigIntMs(options?.idleTimeoutMs),
-    exitRetentionMs: toBigIntMs(options?.exitRetentionMs),
+    maxLifetimeMs: toSafeBigInt(options?.maxLifetimeMs),
+    idleTimeoutMs: toSafeBigInt(options?.idleTimeoutMs),
+    exitRetentionMs: toSafeBigInt(options?.exitRetentionMs),
     limits: options?.limits
       ? {
-          maxMemoryBytes:
-            options.limits.maxMemoryBytes === undefined
-              ? undefined
-              : BigInt(Math.max(0, Math.floor(options.limits.maxMemoryBytes))),
-          maxCpuSecs:
-            options.limits.maxCpuSecs === undefined
-              ? undefined
-              : BigInt(Math.max(0, Math.floor(options.limits.maxCpuSecs))),
+          maxMemoryBytes: toSafeBigInt(options.limits.maxMemoryBytes),
+          maxCpuSecs: toSafeBigInt(options.limits.maxCpuSecs),
           maxPids: options.limits.maxPids,
           maxOpenFiles: options.limits.maxOpenFiles,
         }
@@ -466,6 +470,11 @@ export class PersistentProcess {
    * unbounded wait would pin the pooled instance. Does NOT reap.
    */
   wait(timeoutMs: number): { exitCode: number | undefined; signal: number | undefined } {
+    if (!Number.isFinite(timeoutMs)) {
+      throw SysError.api(
+        `timeoutMs must be a finite number (got ${timeoutMs}); wait is bounded by design`,
+      );
+    }
     const ms = BigInt(Math.max(0, Math.floor(timeoutMs)));
     const exit = callHost(`process.wait(${timeoutMs})`, () => hostWaitById(this.#id, ms));
     return unpackExit(exit);
@@ -477,7 +486,7 @@ export class PersistentProcess {
    * To keep a child's last output, drain it with {@link readSince} BEFORE stop.
    */
   stop(graceMs?: number): { exitCode: number | undefined; signal: number | undefined } {
-    const ms = graceMs === undefined ? undefined : BigInt(Math.max(0, Math.floor(graceMs)));
+    const ms = toSafeBigInt(graceMs);
     const exit = callHost(`process.stop(${graceMs ?? "default"})`, () =>
       hostStop(this.#id, ms),
     );
